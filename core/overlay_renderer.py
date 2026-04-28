@@ -1,16 +1,17 @@
 """
 Overlay rendering module for TEM Image Editor.
-Handles drawing scalebar and aperture overlays on images.
+Handles drawing scalebar, aperture, and measurement overlays on images.
 """
 
 from typing import Optional
+import math
 import numpy as np
 from PyQt6.QtGui import QImage, QPainter, QPen, QBrush, QColor, QFont
 from PyQt6.QtCore import Qt, QRectF
 
 
 class OverlayRenderer:
-    """Handles rendering of scalebar and aperture overlays."""
+    """Handles rendering of scalebar, aperture, and measurement overlays."""
     
     def __init__(self):
         # Scalebar parameters
@@ -32,6 +33,16 @@ class OverlayRenderer:
         self.aperture_enabled = False
         self.aperture_nominal_size = 100  # diameter in µm
         self.aperture_color = QColor(255, 255, 0)
+
+        # Particle measurement annotation parameters
+        self.measurement_enabled = False
+        self.measurements: list = []           # list of {"start": (x,y), "end": (x,y), "label_offset": (dx,dy)}
+        self.measurement_preview: Optional[dict] = None  # in-progress drag
+        self.measurement_unit = "nm"
+        self.measurement_arrow_color = QColor(255, 64, 64)
+        self.measurement_text_color = QColor(255, 64, 64)
+        self.measurement_line_width = 4
+        self.measurement_font = QFont("Arial", 16, QFont.Weight.Bold)
     
     def render_image_with_overlays(self, 
                                    image: np.ndarray, 
@@ -66,19 +77,21 @@ class OverlayRenderer:
         qimg = QImage(rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
         qimg = qimg.copy().convertToFormat(QImage.Format.Format_ARGB32)
         
-        if not self.scalebar_enabled:
-            return qimg
-        
         # Guard against invalid calibration
         if nm_per_pixel is None or nm_per_pixel <= 0:
             return qimg
         
         # Draw scalebar
-        self._draw_scalebar(qimg, width, height, nm_per_pixel)
+        if self.scalebar_enabled:
+            self._draw_scalebar(qimg, width, height, nm_per_pixel)
         
         # Draw aperture if enabled
         if self.aperture_enabled:
             self._draw_aperture(qimg, width, height, nm_per_pixel)
+
+        # Draw particle measurement annotation if enabled
+        if self.measurement_enabled:
+            self._draw_measurement(qimg, width, height, nm_per_pixel)
         
         return qimg
     
@@ -250,3 +263,142 @@ class OverlayRenderer:
         painter.drawEllipse(rect)
         
         painter.end()
+
+    def _draw_measurement(self, qimg: QImage, width: int, height: int, nm_per_pixel: float):
+        """Draw all committed measurements and the live drag preview."""
+        to_draw = list(self.measurements)
+        if self.measurement_preview is not None:
+            to_draw.append(self.measurement_preview)
+        if not to_draw:
+            return
+
+        line_width = max(1, int(self.measurement_line_width))
+        arrow_len = max(10.0, line_width * 3.0)
+        arrow_half = max(5.0, line_width * 1.8)
+        arrow_color = QColor(self.measurement_arrow_color)
+        text_color = QColor(self.measurement_text_color)
+
+        # Pre-compute outline colour for text contrast
+        r, g, b, *_ = text_color.getRgb()
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+        outline_color = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
+
+        painter = QPainter(qimg)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        try:
+            painter.setFont(self.measurement_font if isinstance(self.measurement_font, QFont)
+                            else QFont("Arial", 16, QFont.Weight.Bold))
+        except Exception:
+            painter.setFont(QFont("Arial", 16, QFont.Weight.Bold))
+
+        for m in to_draw:
+            x1 = int(max(0, min(width - 1, m["start"][0])))
+            y1 = int(max(0, min(height - 1, m["start"][1])))
+            x2 = int(max(0, min(width - 1, m["end"][0])))
+            y2 = int(max(0, min(height - 1, m["end"][1])))
+
+            dx = float(x2 - x1)
+            dy = float(y2 - y1)
+            length_px = math.hypot(dx, dy)
+            if length_px < 1e-6:
+                continue
+
+            ux = dx / length_px
+            uy = dy / length_px
+            px = -uy
+            py = ux
+
+            # Main line
+            pen = QPen(arrow_color)
+            try:
+                pen.setWidthF(float(line_width))
+            except Exception:
+                pen.setWidth(line_width)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(x1, y1, x2, y2)
+
+            # Arrow head at start
+            s1x = x1 + ux * arrow_len + px * arrow_half
+            s1y = y1 + uy * arrow_len + py * arrow_half
+            s2x = x1 + ux * arrow_len - px * arrow_half
+            s2y = y1 + uy * arrow_len - py * arrow_half
+            painter.drawLine(x1, y1, int(round(s1x)), int(round(s1y)))
+            painter.drawLine(x1, y1, int(round(s2x)), int(round(s2y)))
+
+            # Arrow head at end
+            e1x = x2 - ux * arrow_len + px * arrow_half
+            e1y = y2 - uy * arrow_len + py * arrow_half
+            e2x = x2 - ux * arrow_len - px * arrow_half
+            e2y = y2 - uy * arrow_len - py * arrow_half
+            painter.drawLine(x2, y2, int(round(e1x)), int(round(e1y)))
+            painter.drawLine(x2, y2, int(round(e2x)), int(round(e2y)))
+
+            # Label
+            length_nm = length_px * float(nm_per_pixel)
+            if self.measurement_unit == "µm":
+                value = length_nm / 1000.0
+                unit_text = "µm"
+            else:
+                value = length_nm
+                unit_text = "nm"
+            value_text = (f"{int(round(value))}" if abs(value - round(value)) < 1e-9
+                          else f"{value:.2f}".rstrip('0').rstrip('.'))
+            label = f"{value_text} {unit_text}"
+
+            fm = painter.fontMetrics()
+            text_w = fm.horizontalAdvance(label)
+            ascent = fm.ascent()
+            descent = fm.descent()
+
+            mid_x = (x1 + x2) / 2.0
+            mid_y = (y1 + y2) / 2.0
+            default_offset = max(16.0, line_width * 3.0)
+            # Apply stored per-measurement label offset (image-pixel space)
+            ldx = float(m.get("label_offset", (0.0, 0.0))[0])
+            ldy = float(m.get("label_offset", (0.0, 0.0))[1])
+            text_cx = mid_x + px * default_offset + ldx
+            text_cy = mid_y + py * default_offset + ldy
+
+            text_x = int(round(text_cx - text_w / 2.0))
+            text_baseline_y = int(round(text_cy + (ascent - descent) / 2.0))
+            text_x = max(0, min(width - text_w, text_x))
+            text_baseline_y = max(ascent, min(height - descent, text_baseline_y))
+
+            outline_pen = QPen(outline_color)
+            outline_pen.setWidth(3)
+            painter.setPen(outline_pen)
+            painter.drawText(text_x, text_baseline_y, label)
+            painter.setPen(QPen(text_color))
+            painter.drawText(text_x, text_baseline_y, label)
+
+        painter.end()
+
+    def get_label_centres(self) -> list:
+        """Return the image-pixel centre of each committed measurement label.
+        Used for hit-testing during label-drag mode.
+        Returns list of (cx, cy) floats (or None if degenerate), one per self.measurements.
+        """
+        results = []
+        line_width = max(1, int(self.measurement_line_width))
+        default_offset = max(16.0, line_width * 3.0)
+        for m in self.measurements:
+            x1, y1 = float(m["start"][0]), float(m["start"][1])
+            x2, y2 = float(m["end"][0]), float(m["end"][1])
+            dx = x2 - x1
+            dy = y2 - y1
+            length_px = math.hypot(dx, dy)
+            if length_px < 1e-6:
+                results.append(None)
+                continue
+            ux, uy = dx / length_px, dy / length_px
+            pnx, pny = -uy, ux          # perpendicular unit vector
+            mid_x = (x1 + x2) / 2.0
+            mid_y = (y1 + y2) / 2.0
+            ldx = float(m.get("label_offset", (0.0, 0.0))[0])
+            ldy = float(m.get("label_offset", (0.0, 0.0))[1])
+            cx = mid_x + pnx * default_offset + ldx
+            cy = mid_y + pny * default_offset + ldy
+            results.append((cx, cy))
+        return results

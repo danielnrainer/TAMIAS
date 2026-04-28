@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QCheckBox, QMessageBox, QSpinBox, QDialog, QListWidget,
     QProgressDialog, QScrollArea
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage, QAction, QColor, QFont
 from PyQt6.QtWidgets import QColorDialog, QFontDialog
 
@@ -34,6 +34,52 @@ class SmartDoubleSpinBox(QDoubleSpinBox):
             return (f"{value:.2f}").rstrip('0').rstrip('.')
         except Exception:
             return super().textFromValue(value)
+
+
+class ImageDisplayLabel(QLabel):
+    """Image label that supports both click-drag (draw) and label-drag (move) modes."""
+    clicked = pyqtSignal(int, int)
+    mouse_pressed = pyqtSignal(int, int)
+    mouse_moved = pyqtSignal(int, int)
+    mouse_released = pyqtSignal(int, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._draw_mode = False
+        self._label_drag_mode = False
+
+    def set_draw_mode(self, active: bool):
+        self._draw_mode = active
+        self._label_drag_mode = False
+        self.setCursor(Qt.CursorShape.CrossCursor if active else Qt.CursorShape.ArrowCursor)
+
+    def set_label_drag_mode(self, active: bool):
+        self._label_drag_mode = active
+        self._draw_mode = False
+        self.setCursor(Qt.CursorShape.OpenHandCursor if active else Qt.CursorShape.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            x, y = int(event.position().x()), int(event.position().y())
+            if self._draw_mode or self._label_drag_mode:
+                self.mouse_pressed.emit(x, y)
+                if self._label_drag_mode:
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            else:
+                self.clicked.emit(x, y)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (self._draw_mode or self._label_drag_mode) and (event.buttons() & Qt.MouseButton.LeftButton):
+            self.mouse_moved.emit(int(event.position().x()), int(event.position().y()))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and (self._draw_mode or self._label_drag_mode):
+            self.mouse_released.emit(int(event.position().x()), int(event.position().y()))
+            if self._label_drag_mode:
+                self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
 
 # Import our modules
 from core.image_processor import ImageProcessor
@@ -58,6 +104,15 @@ class TEMImageEditor(QMainWindow):
         self.current_file: Optional[str] = None
         self.nm_per_pixel = 1.0
         self.pixel_size_unit = "nm"
+
+        # Measurement interaction state
+        self._draw_mode_active = False
+        self._draw_preview_start: Optional[tuple[int, int]] = None
+        self._label_drag_active = False
+        self._label_drag_index: Optional[int] = None        # which measurement
+        self._label_drag_origin_img: Optional[tuple[float, float]] = None  # img coords at press
+        self._label_drag_offset_start: tuple[float, float] = (0.0, 0.0)   # offset at drag start
+        self._last_rendered_image_size: Optional[tuple[int, int]] = None
         
         # Load presets
         self.presets = PresetStorage.load_presets()
@@ -113,11 +168,14 @@ class TEMImageEditor(QMainWindow):
         # Left side - Image display
         image_layout = QVBoxLayout()
         
-        self.image_label = QLabel()
+        self.image_label = ImageDisplayLabel()
         self.image_label.setMinimumSize(800, 600)
         self.image_label.setStyleSheet("QLabel { background-color: #2b2b2b; border: 2px solid #555; }")
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setText("No image loaded")
+        self.image_label.mouse_pressed.connect(self.on_draw_press)
+        self.image_label.mouse_moved.connect(self.on_draw_move)
+        self.image_label.mouse_released.connect(self.on_draw_release)
         
         image_layout.addWidget(self.image_label)
         
@@ -157,6 +215,9 @@ class TEMImageEditor(QMainWindow):
         
         # Aperture controls
         self._setup_aperture_controls(controls_layout)
+
+        # Particle measurement controls
+        self._setup_measurement_controls(controls_layout)
         
         # Export button
         export_btn = QPushButton("Export Image")
@@ -408,6 +469,91 @@ class TEMImageEditor(QMainWindow):
         
         aperture_box.setContentLayout(aperture_layout)
         parent_layout.addWidget(aperture_box)
+
+    def _setup_measurement_controls(self, parent_layout):
+        """Setup particle measurement controls."""
+        measurement_box = QCollapsibleBox("Particle Measurement", expanded=False)
+        measurement_layout = QVBoxLayout()
+
+        self.measurement_checkbox = QCheckBox("Show Measurement Annotations")
+        self.measurement_checkbox.setChecked(False)
+        self.measurement_checkbox.stateChanged.connect(self.on_measurement_toggled)
+        measurement_layout.addWidget(self.measurement_checkbox)
+
+        # Draw mode toggle
+        self.draw_measurement_btn = QPushButton("✏  Draw Measurement")
+        self.draw_measurement_btn.setCheckable(True)
+        self.draw_measurement_btn.setToolTip(
+            "Click and drag on the image to draw a measurement line"
+        )
+        self.draw_measurement_btn.toggled.connect(self.on_draw_mode_toggled)
+        measurement_layout.addWidget(self.draw_measurement_btn)
+
+        self.move_label_btn = QPushButton("☰  Move Label")
+        self.move_label_btn.setCheckable(True)
+        self.move_label_btn.setToolTip(
+            "Click and drag a measurement label to reposition it"
+        )
+        self.move_label_btn.toggled.connect(self.on_label_drag_mode_toggled)
+        measurement_layout.addWidget(self.move_label_btn)
+
+        # Style controls
+        unit_layout = QHBoxLayout()
+        unit_layout.addWidget(QLabel("Length Unit:"))
+        self.measurement_unit_combo = QComboBox()
+        self.measurement_unit_combo.addItems(["nm", "µm"])
+        self.measurement_unit_combo.currentTextChanged.connect(self.on_measurement_changed)
+        unit_layout.addWidget(self.measurement_unit_combo)
+        measurement_layout.addLayout(unit_layout)
+
+        thickness_layout = QHBoxLayout()
+        thickness_layout.addWidget(QLabel("Arrow Thickness (px):"))
+        self.measurement_thickness_spinbox = QSpinBox()
+        self.measurement_thickness_spinbox.setRange(1, 20)
+        self.measurement_thickness_spinbox.setValue(self.overlay_renderer.measurement_line_width)
+        self.measurement_thickness_spinbox.valueChanged.connect(self.on_measurement_changed)
+        thickness_layout.addWidget(self.measurement_thickness_spinbox)
+        measurement_layout.addLayout(thickness_layout)
+
+        arrow_color_layout = QHBoxLayout()
+        arrow_color_layout.addWidget(QLabel("Arrow Color:"))
+        self.measurement_arrow_color_btn = QPushButton("Choose Color...")
+        self.measurement_arrow_color_btn.clicked.connect(self.choose_measurement_arrow_color)
+        arrow_color_layout.addWidget(self.measurement_arrow_color_btn)
+        measurement_layout.addLayout(arrow_color_layout)
+
+        text_color_layout = QHBoxLayout()
+        text_color_layout.addWidget(QLabel("Text Color:"))
+        self.measurement_text_color_btn = QPushButton("Choose Color...")
+        self.measurement_text_color_btn.clicked.connect(self.choose_measurement_text_color)
+        text_color_layout.addWidget(self.measurement_text_color_btn)
+        measurement_layout.addLayout(text_color_layout)
+
+        # Measurement list
+        measurement_layout.addWidget(QLabel("Measurements:"))
+        self.measurement_list = QListWidget()
+        self.measurement_list.setMaximumHeight(130)
+        self.measurement_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        measurement_layout.addWidget(self.measurement_list)
+
+        list_btn_layout = QHBoxLayout()
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self.remove_selected_measurement)
+        list_btn_layout.addWidget(remove_btn)
+        clear_all_btn = QPushButton("Clear All")
+        clear_all_btn.clicked.connect(self.clear_all_measurements)
+        list_btn_layout.addWidget(clear_all_btn)
+        measurement_layout.addLayout(list_btn_layout)
+
+        self.measurement_status_label = QLabel(
+            "Enable 'Show Annotations', then click 'Draw Measurement' and drag on the image."
+        )
+        self.measurement_status_label.setStyleSheet("QLabel { color: #888; font-size: 10pt; }")
+        self.measurement_status_label.setWordWrap(True)
+        measurement_layout.addWidget(self.measurement_status_label)
+
+        measurement_box.setContentLayout(measurement_layout)
+        parent_layout.addWidget(measurement_box)
         
     # Event handlers
     def load_image(self):
@@ -468,6 +614,7 @@ class TEMImageEditor(QMainWindow):
             
             self.nm_per_pixel = npp
             self._update_pixel_size_display()
+            self._update_measurement_info_label()
             
             # Set preset-specific scalebar defaults (only if UI is fully initialized)
             if hasattr(self, 'unit_combo') and hasattr(self, 'scalebar_length_spinbox'):
@@ -496,6 +643,7 @@ class TEMImageEditor(QMainWindow):
             npp = 1.0
         self.nm_per_pixel = npp
         self.presets["Custom"] = npp
+        self._update_measurement_info_label()
         self.update_display()
     
     def on_pixel_size_unit_changed(self, unit: str):
@@ -510,6 +658,7 @@ class TEMImageEditor(QMainWindow):
         elif old_unit == "µm" and unit == "nm":
             self.pixel_size_spinbox.setValue(current_val * 1000.0)
         self.pixel_size_spinbox.blockSignals(False)
+        self._update_measurement_info_label()
         self.update_display()
     
     def on_brightness_contrast_changed(self):
@@ -535,6 +684,7 @@ class TEMImageEditor(QMainWindow):
         """Reset brightness/contrast."""
         self.image_processor.reset_brightness_contrast()
         self._update_brightness_sliders()
+        self._update_measurement_info_label()
         self.update_display()
     
     def auto_adjust(self):
@@ -679,6 +829,251 @@ class TEMImageEditor(QMainWindow):
         if color.isValid():
             self.overlay_renderer.aperture_color = color
             self.update_display()
+
+    def on_measurement_toggled(self, state):
+        """Enable or disable particle measurement overlay."""
+        self.overlay_renderer.measurement_enabled = (state == Qt.CheckState.Checked.value)
+        self.update_display()
+
+    def on_measurement_changed(self):
+        """Handle measurement style changes (unit, thickness)."""
+        self.overlay_renderer.measurement_unit = self.measurement_unit_combo.currentText()
+        self.overlay_renderer.measurement_line_width = self.measurement_thickness_spinbox.value()
+        self._refresh_measurements_list()
+        self.update_display()
+
+    def choose_measurement_arrow_color(self):
+        """Choose measurement arrow color."""
+        color = QColorDialog.getColor(
+            self.overlay_renderer.measurement_arrow_color, self, "Choose Measurement Arrow Color"
+        )
+        if color.isValid():
+            self.overlay_renderer.measurement_arrow_color = color
+            self.update_display()
+
+    def choose_measurement_text_color(self):
+        """Choose measurement label color."""
+        color = QColorDialog.getColor(
+            self.overlay_renderer.measurement_text_color, self, "Choose Measurement Text Color"
+        )
+        if color.isValid():
+            self.overlay_renderer.measurement_text_color = color
+            self.update_display()
+
+    # --- Draw-mode drag handlers ---
+
+    def on_draw_mode_toggled(self, checked: bool):
+        """Toggle drag-draw mode on the image label."""
+        self._draw_mode_active = checked
+        self.image_label.set_draw_mode(checked)
+        if checked:
+            # Untoggle move-label mode
+            self.move_label_btn.blockSignals(True)
+            self.move_label_btn.setChecked(False)
+            self.move_label_btn.blockSignals(False)
+            self._label_drag_active = False
+            self.measurement_status_label.setText(
+                "Draw mode ON — click and drag on the image to add a measurement."
+            )
+        else:
+            self._draw_preview_start = None
+            self.overlay_renderer.measurement_preview = None
+            self.measurement_status_label.setText("Draw mode off.")
+            self.update_display()
+
+    def on_label_drag_mode_toggled(self, checked: bool):
+        """Toggle label-drag (move label) mode."""
+        self._label_drag_active = checked
+        self.image_label.set_label_drag_mode(checked)
+        if checked:
+            # Untoggle draw mode
+            self.draw_measurement_btn.blockSignals(True)
+            self.draw_measurement_btn.setChecked(False)
+            self.draw_measurement_btn.blockSignals(False)
+            self._draw_mode_active = False
+            self.measurement_status_label.setText(
+                "Move Label mode ON — click and drag any label to reposition it."
+            )
+        else:
+            self._label_drag_index = None
+            self.measurement_status_label.setText("Move Label mode off.")
+
+    def on_draw_press(self, x: int, y: int):
+        """Mouse press — either start a new line or grab a label."""
+        if not self.image_processor.has_image():
+            return
+        if self._label_drag_active:
+            self._start_label_drag(x, y)
+            return
+        # draw-mode branch
+        mapped = self._map_label_to_image_coords(x, y)
+        if mapped is None:
+            return
+        self._draw_preview_start = mapped
+        self.overlay_renderer.measurement_preview = {"start": mapped, "end": mapped}
+        self.update_display()
+
+    def on_draw_move(self, x: int, y: int):
+        """Mouse move — update live preview or drag a label."""
+        if self._label_drag_active:
+            self._update_label_drag(x, y)
+            return
+        if self._draw_preview_start is None:
+            return
+        mapped = self._map_label_to_image_coords(x, y)
+        if mapped is None:
+            return
+        self.overlay_renderer.measurement_preview = {
+            "start": self._draw_preview_start, "end": mapped
+        }
+        self.update_display()
+
+    def on_draw_release(self, x: int, y: int):
+        """Mouse release — commit a new line or drop a dragged label."""
+        if self._label_drag_active:
+            self._finish_label_drag(x, y)
+            return
+        if self._draw_preview_start is None:
+            return
+        mapped = self._map_label_to_image_coords(x, y)
+        if mapped is None:
+            mapped = self._draw_preview_start
+        start = self._draw_preview_start
+        end = mapped
+        self._draw_preview_start = None
+        self.overlay_renderer.measurement_preview = None
+        if np.hypot(float(end[0] - start[0]), float(end[1] - start[1])) > 3:
+            self.overlay_renderer.measurements.append({"start": start, "end": end})
+            self._refresh_measurements_list()
+        self.update_display()
+
+    # --- Label-drag helpers ---
+
+    def _start_label_drag(self, label_x: int, label_y: int):
+        """Find the nearest label under the cursor and start dragging it."""
+        self._label_drag_index = None
+        if not self.image_processor.has_image() or self._last_rendered_image_size is None:
+            return
+        img_w, img_h = self._last_rendered_image_size
+        display_w = max(1, self.image_label.width())
+        display_h = max(1, self.image_label.height())
+        scale = min(display_w / img_w, display_h / img_h)
+
+        centres = self.overlay_renderer.get_label_centres()
+        hit_radius_screen = 40.0   # pixels in screen space
+        best_dist = hit_radius_screen
+        best_idx = None
+        for i, c in enumerate(centres):
+            if c is None:
+                continue
+            # convert image coords -> screen coords
+            offset_x = (display_w - img_w * scale) / 2.0
+            offset_y = (display_h - img_h * scale) / 2.0
+            sx = c[0] * scale + offset_x
+            sy = c[1] * scale + offset_y
+            dist = np.hypot(label_x - sx, label_y - sy)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = i
+
+        if best_idx is None:
+            self.measurement_status_label.setText(
+                "No label found nearby. Click closer to a label."
+            )
+            return
+
+        self._label_drag_index = best_idx
+        mapped = self._map_label_to_image_coords(label_x, label_y)
+        self._label_drag_origin_img = mapped if mapped is not None else (0.0, 0.0)
+        m = self.overlay_renderer.measurements[best_idx]
+        self._label_drag_offset_start = tuple(m.get("label_offset", (0.0, 0.0)))
+
+    def _update_label_drag(self, label_x: int, label_y: int):
+        """Update the dragged label's offset as the mouse moves."""
+        if self._label_drag_index is None or self._label_drag_origin_img is None:
+            return
+        mapped = self._map_label_to_image_coords(label_x, label_y)
+        if mapped is None:
+            return
+        ddx = float(mapped[0]) - float(self._label_drag_origin_img[0])
+        ddy = float(mapped[1]) - float(self._label_drag_origin_img[1])
+        new_offset = (
+            float(self._label_drag_offset_start[0]) + ddx,
+            float(self._label_drag_offset_start[1]) + ddy,
+        )
+        self.overlay_renderer.measurements[self._label_drag_index]["label_offset"] = new_offset
+        self.update_display()
+
+    def _finish_label_drag(self, label_x: int, label_y: int):
+        """Commit the final label position."""
+        self._update_label_drag(label_x, label_y)
+        self._label_drag_index = None
+        self._label_drag_origin_img = None
+
+    def remove_selected_measurement(self):
+        """Remove the selected measurement from the list."""
+        row = self.measurement_list.currentRow()
+        if 0 <= row < len(self.overlay_renderer.measurements):
+            self.overlay_renderer.measurements.pop(row)
+            self._refresh_measurements_list()
+            self.update_display()
+
+    def clear_all_measurements(self):
+        """Clear all measurement annotations."""
+        self.overlay_renderer.measurements.clear()
+        self.overlay_renderer.measurement_preview = None
+        self._draw_preview_start = None
+        self.measurement_list.clear()
+        self.measurement_status_label.setText("All measurements cleared.")
+        self.update_display()
+
+    def _refresh_measurements_list(self):
+        """Repopulate the sidebar list with current measurements and lengths."""
+        if not hasattr(self, 'measurement_list'):
+            return
+        self.measurement_list.clear()
+        unit = self.overlay_renderer.measurement_unit
+        for i, m in enumerate(self.overlay_renderer.measurements):
+            dx = float(m["end"][0] - m["start"][0])
+            dy = float(m["end"][1] - m["start"][1])
+            length_nm = float(np.hypot(dx, dy)) * float(self.nm_per_pixel)
+            value = length_nm / 1000.0 if unit == "µm" else length_nm
+            val_text = (f"{int(round(value))}" if abs(value - round(value)) < 1e-9
+                        else f"{value:.2f}".rstrip('0').rstrip('.'))
+            self.measurement_list.addItem(f"  {i + 1}:  {val_text} {unit}")
+
+    def _map_label_to_image_coords(self, label_x: int, label_y: int) -> Optional[tuple[int, int]]:
+        """Map click coordinates from QLabel space to source image pixel coordinates."""
+        if self._last_rendered_image_size is None:
+            return None
+
+        img_w, img_h = self._last_rendered_image_size
+        if img_w <= 0 or img_h <= 0:
+            return None
+
+        display_w = max(1, self.image_label.width())
+        display_h = max(1, self.image_label.height())
+
+        scale = min(display_w / img_w, display_h / img_h)
+        scaled_w = img_w * scale
+        scaled_h = img_h * scale
+        offset_x = (display_w - scaled_w) / 2.0
+        offset_y = (display_h - scaled_h) / 2.0
+
+        if label_x < offset_x or label_y < offset_y:
+            return None
+        if label_x > offset_x + scaled_w or label_y > offset_y + scaled_h:
+            return None
+
+        img_x = int(round((label_x - offset_x) / scale))
+        img_y = int(round((label_y - offset_y) / scale))
+        img_x = max(0, min(img_w - 1, img_x))
+        img_y = max(0, min(img_h - 1, img_y))
+        return (img_x, img_y)
+
+    def _update_measurement_info_label(self):
+        """Refresh the measurement list (kept for compatibility with existing call sites)."""
+        self._refresh_measurements_list()
     
     def update_display(self):
         """Update the displayed image."""
@@ -693,6 +1088,8 @@ class TEMImageEditor(QMainWindow):
         
         if q_image is None:
             return
+
+        self._last_rendered_image_size = (q_image.width(), q_image.height())
         
         pixmap = QPixmap.fromImage(q_image)
         scaled_pixmap = pixmap.scaled(
@@ -1220,11 +1617,11 @@ class BatchAnnotationDialog(QDialog):
                 file_nm_per_pixel = nm_per_pixel
                 if pixel_metadata and 'pixel_size_nm' in pixel_metadata:
                     # Use pixel size from file header
-                    if pixel_size_unit == "µm":
+                    if pixel_unit == "µm":
                         file_nm_per_pixel = pixel_metadata['pixel_size_um']
                     else:
                         file_nm_per_pixel = pixel_metadata['pixel_size_nm']
-                    print(f"Using pixel size from {Path(file_path).name}: {file_nm_per_pixel:.3f} {pixel_size_unit}")
+                    print(f"Using pixel size from {Path(file_path).name}: {file_nm_per_pixel:.3f} {pixel_unit}")
                 
                 # Auto adjust if requested
                 if auto_bc:

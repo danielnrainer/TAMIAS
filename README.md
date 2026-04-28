@@ -1,6 +1,7 @@
 # SynergyED Image Annotate
 
 A PyQt6-based desktop application for processing (mainly) Synergy-ED images with scalebars, aperture overlays, and batch processing capabilities.
+A PyQt6-based desktop application for processing (mainly) Synergy-ED images with scalebars, aperture overlays, particle measurements, and batch processing capabilities.
 
 ## Features
 
@@ -8,6 +9,7 @@ A PyQt6-based desktop application for processing (mainly) Synergy-ED images with
 - **RODHyPix Support**: Native support for `.rodhypix` detector image files with automatic pixel size extraction
 - **Smart Scalebars**: Calibrated scalebars with customizable appearance (length, thickness, position, colors, font)
 - **Aperture Overlay**: Visualize SAED aperture sizes on images
+- **Particle Measurement**: Draw and annotate dimension measurements directly on the image — supports multiple measurements, drag-to-draw, movable labels, and configurable arrow/text styling
 - **Batch Processing**: Process multiple images with consistent settings
 - **Imaging Presets**: Store and manage pixel size calibrations for different imaging modes
 - **Compact UI**: Laptop-friendly interface with collapsible sections and scrollable controls
@@ -57,7 +59,8 @@ python SynergyED-img_annotate.py
 2. Select imaging mode preset or enter pixel size manually
 3. Adjust brightness/contrast (Auto Adjust recommended)
 4. Configure scalebar settings (length, position, colors)
-5. Export image (Ctrl+S)
+5. Optionally add particle measurements: enable **Particle Measurement**, click **✏ Draw Measurement** and drag; use **☰ Move Label** to reposition labels
+6. Export image (Ctrl+S)
 
 **Batch Processing:**
 - File → Batch Annotate (Ctrl+B)
@@ -69,7 +72,7 @@ python SynergyED-img_annotate.py
 SynergyED-img_annotate/
 ├── core/                       # Core processing modules
 │   ├── image_processor.py     # Image loading and adjustments
-│   └── overlay_renderer.py    # Scalebar and aperture rendering
+│   └── overlay_renderer.py    # Scalebar, aperture and measurement rendering
 ├── gui/                       # GUI components
 │   └── collapsible_box.py    # Collapsible section widget
 ├── utils/                     # Utility modules
@@ -104,6 +107,7 @@ SynergyED-img_annotate/
   - Pure Python fallback for compatibility
 - **Architecture**: Modular design with separate core, GUI, and utility modules
 - **UI**: Collapsible sections for efficient screen space management
+- **Particle Measurement**: Click-and-drag double-headed arrows with auto-computed length labels; multiple annotations supported simultaneously; label positions stored as per-measurement image-pixel offsets and fully repositionable via drag
 
 ## Acknowledgments
 
