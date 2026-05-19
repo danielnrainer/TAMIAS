@@ -480,6 +480,11 @@ class TEMImageEditor(QMainWindow):
         self.measurement_checkbox.stateChanged.connect(self.on_measurement_toggled)
         measurement_layout.addWidget(self.measurement_checkbox)
 
+        self.measurement_label_checkbox = QCheckBox("Include Length Label")
+        self.measurement_label_checkbox.setChecked(self.overlay_renderer.measurement_show_label)
+        self.measurement_label_checkbox.stateChanged.connect(self.on_measurement_changed)
+        measurement_layout.addWidget(self.measurement_label_checkbox)
+
         # Draw mode toggle
         self.draw_measurement_btn = QPushButton("✏  Draw Measurement")
         self.draw_measurement_btn.setCheckable(True)
@@ -575,20 +580,18 @@ class TEMImageEditor(QMainWindow):
                 # If we got pixel metadata from rodhypix file, automatically set the calibration
                 if pixel_metadata and 'pixel_size_nm' in pixel_metadata:
                     # Set the pixel size calibration automatically
-                    nm_per_pixel = pixel_metadata['pixel_size_nm']
-                    um_per_pixel = pixel_metadata['pixel_size_um']
+                    nm_per_pixel = float(pixel_metadata['pixel_size_nm'])
+                    um_per_pixel = float(pixel_metadata['pixel_size_um'])
                     
                     # Determine which unit is more appropriate (prefer nm for < 1 µm, µm for >= 1 µm)
-                    if um_per_pixel >= 1.0:
-                        self.nm_per_pixel = um_per_pixel
-                        self.pixel_size_unit = "µm"
-                        self.pixel_size_unit_combo.setCurrentText("µm")
-                    else:
-                        self.nm_per_pixel = nm_per_pixel
-                        self.pixel_size_unit = "nm"
-                        self.pixel_size_unit_combo.setCurrentText("nm")
-                    
-                    self._update_pixel_size_display()
+                    preferred_unit = "µm" if um_per_pixel >= 1.0 else "nm"
+
+                    # Keep calibration in nm/pixel internally and avoid signal-driven overwrites.
+                    self.nm_per_pixel = nm_per_pixel
+                    self.pixel_size_unit = preferred_unit
+                    self.pixel_size_unit_combo.blockSignals(True)
+                    self.pixel_size_unit_combo.setCurrentText(preferred_unit)
+                    self.pixel_size_unit_combo.blockSignals(False)
                     
                     # Show a message to the user
                     info_text = f"Pixel size from file header: {nm_per_pixel:.1f} nm ({um_per_pixel:.3f} µm)"
@@ -598,7 +601,16 @@ class TEMImageEditor(QMainWindow):
                 # Auto adjust and display
                 self.image_processor.auto_adjust_contrast()
                 self._update_brightness_sliders()
-                self.update_display()
+
+                # Reset overlays that are image-specific
+                self.scalebar_checkbox.setChecked(False)
+                self.overlay_renderer.measurements.clear()
+                self.overlay_renderer.measurement_preview = None
+                self._draw_preview_start = None
+                if hasattr(self, 'measurement_list'):
+                    self.measurement_list.clear()
+
+                self._refresh_scale_information()
             else:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{error}")
     
@@ -613,8 +625,6 @@ class TEMImageEditor(QMainWindow):
                 npp = 1.0
             
             self.nm_per_pixel = npp
-            self._update_pixel_size_display()
-            self._update_measurement_info_label()
             
             # Set preset-specific scalebar defaults (only if UI is fully initialized)
             if hasattr(self, 'unit_combo') and hasattr(self, 'scalebar_length_spinbox'):
@@ -626,7 +636,16 @@ class TEMImageEditor(QMainWindow):
                     self.unit_combo.setCurrentText("nm")
                     self.scalebar_length_spinbox.setValue(500.0)
                     self.scalebar_length_text_raw = "500"
-            
+
+            self._refresh_scale_information()
+
+    def _refresh_scale_information(self):
+        """Refresh scale-dependent UI and overlays after calibration or preset updates."""
+        self._update_pixel_size_display()
+        self._update_measurement_info_label()
+        if hasattr(self, 'scalebar_length_spinbox'):
+            self.on_scalebar_changed()
+        else:
             self.update_display()
     
     def _update_pixel_size_display(self):
@@ -836,9 +855,17 @@ class TEMImageEditor(QMainWindow):
         self.update_display()
 
     def on_measurement_changed(self):
-        """Handle measurement style changes (unit, thickness)."""
+        """Handle measurement style changes (unit, thickness, label visibility)."""
         self.overlay_renderer.measurement_unit = self.measurement_unit_combo.currentText()
         self.overlay_renderer.measurement_line_width = self.measurement_thickness_spinbox.value()
+        self.overlay_renderer.measurement_show_label = self.measurement_label_checkbox.isChecked()
+        move_labels_enabled = self.overlay_renderer.measurement_show_label
+        self.move_label_btn.setEnabled(move_labels_enabled)
+        if not move_labels_enabled and self.move_label_btn.isChecked():
+            self.move_label_btn.setChecked(False)
+            self.measurement_status_label.setText(
+                "Length labels hidden. Enable 'Include Length Label' to move label positions."
+            )
         self._refresh_measurements_list()
         self.update_display()
 
@@ -872,6 +899,9 @@ class TEMImageEditor(QMainWindow):
             self.move_label_btn.setChecked(False)
             self.move_label_btn.blockSignals(False)
             self._label_drag_active = False
+            # Ensure the annotation overlay is active when drawing starts
+            if not self.measurement_checkbox.isChecked():
+                self.measurement_checkbox.setChecked(True)
             self.measurement_status_label.setText(
                 "Draw mode ON — click and drag on the image to add a measurement."
             )
@@ -1038,8 +1068,7 @@ class TEMImageEditor(QMainWindow):
             dy = float(m["end"][1] - m["start"][1])
             length_nm = float(np.hypot(dx, dy)) * float(self.nm_per_pixel)
             value = length_nm / 1000.0 if unit == "µm" else length_nm
-            val_text = (f"{int(round(value))}" if abs(value - round(value)) < 1e-9
-                        else f"{value:.2f}".rstrip('0').rstrip('.'))
+            val_text = str(int(round(value)))
             self.measurement_list.addItem(f"  {i + 1}:  {val_text} {unit}")
 
     def _map_label_to_image_coords(self, label_x: int, label_y: int) -> Optional[tuple[int, int]]:

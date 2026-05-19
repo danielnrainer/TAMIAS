@@ -39,8 +39,9 @@ class OverlayRenderer:
         self.measurements: list = []           # list of {"start": (x,y), "end": (x,y), "label_offset": (dx,dy)}
         self.measurement_preview: Optional[dict] = None  # in-progress drag
         self.measurement_unit = "nm"
-        self.measurement_arrow_color = QColor(255, 64, 64)
-        self.measurement_text_color = QColor(255, 64, 64)
+        self.measurement_arrow_color = QColor(0, 255, 0)
+        self.measurement_text_color = QColor(0, 255, 0)
+        self.measurement_show_label = True
         self.measurement_line_width = 4
         self.measurement_font = QFont("Arial", 16, QFont.Weight.Bold)
     
@@ -276,12 +277,14 @@ class OverlayRenderer:
         arrow_len = max(10.0, line_width * 3.0)
         arrow_half = max(5.0, line_width * 1.8)
         arrow_color = QColor(self.measurement_arrow_color)
+        show_label = bool(self.measurement_show_label)
         text_color = QColor(self.measurement_text_color)
 
         # Pre-compute outline colour for text contrast
-        r, g, b, *_ = text_color.getRgb()
-        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-        outline_color = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
+        if show_label:
+            r, g, b, *_ = text_color.getRgb()
+            luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+            outline_color = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
 
         painter = QPainter(qimg)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -336,6 +339,9 @@ class OverlayRenderer:
             painter.drawLine(x2, y2, int(round(e2x)), int(round(e2y)))
 
             # Label
+            if not show_label:
+                continue
+
             length_nm = length_px * float(nm_per_pixel)
             if self.measurement_unit == "µm":
                 value = length_nm / 1000.0
@@ -343,8 +349,7 @@ class OverlayRenderer:
             else:
                 value = length_nm
                 unit_text = "nm"
-            value_text = (f"{int(round(value))}" if abs(value - round(value)) < 1e-9
-                          else f"{value:.2f}".rstrip('0').rstrip('.'))
+            value_text = str(int(round(value)))
             label = f"{value_text} {unit_text}"
 
             fm = painter.fontMetrics()
@@ -380,6 +385,9 @@ class OverlayRenderer:
         Used for hit-testing during label-drag mode.
         Returns list of (cx, cy) floats (or None if degenerate), one per self.measurements.
         """
+        if not self.measurement_show_label:
+            return [None for _ in self.measurements]
+
         results = []
         line_width = max(1, int(self.measurement_line_width))
         default_offset = max(16.0, line_width * 3.0)
