@@ -40,7 +40,7 @@ class OverlayRenderer:
         self.measurements: list = []           # list of {"start": (x,y), "end": (x,y), "label_offset": (dx,dy)}
         self.measurement_preview: Optional[dict] = None  # in-progress drag
         self.measurement_unit = "nm"
-        self.measurement_arrow_color = QColor(0, 255, 0)
+        self.measurement_line_color = QColor(0, 255, 0)
         self.measurement_text_color = QColor(0, 255, 0)
         self.measurement_show_label = True
         self.measurement_line_width = 4
@@ -365,19 +365,6 @@ class OverlayRenderer:
         if not to_draw:
             return
 
-        line_width = max(1, int(self.measurement_line_width))
-        arrow_len = max(10.0, line_width * 3.0)
-        arrow_half = max(5.0, line_width * 1.8)
-        arrow_color = QColor(self.measurement_arrow_color)
-        show_label = bool(self.measurement_show_label)
-        text_color = QColor(self.measurement_text_color)
-
-        # Pre-compute outline colour for text contrast
-        if show_label:
-            r, g, b, *_ = text_color.getRgb()
-            luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-            outline_color = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
-
         painter = QPainter(qimg)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
@@ -403,9 +390,15 @@ class OverlayRenderer:
             uy = dy / length_px
             px = -uy
             py = ux
+            line_width = max(1, int(m.get("line_width", self.measurement_line_width)))
+            cap_len = max(10.0, line_width * 3.0)
+            cap_half = max(5.0, line_width * 1.8)
+            line_color = QColor(m.get("line_color", self.measurement_line_color))
+            text_color = QColor(m.get("text_color", self.measurement_text_color))
+            show_label = bool(m.get("show_label", self.measurement_show_label))
 
             # Main line
-            pen = QPen(arrow_color)
+            pen = QPen(line_color)
             try:
                 pen.setWidthF(float(line_width))
             except Exception:
@@ -414,25 +407,26 @@ class OverlayRenderer:
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawLine(x1, y1, x2, y2)
 
-            # Arrow head at start
-            s1x = x1 + ux * arrow_len + px * arrow_half
-            s1y = y1 + uy * arrow_len + py * arrow_half
-            s2x = x1 + ux * arrow_len - px * arrow_half
-            s2y = y1 + uy * arrow_len - py * arrow_half
-            painter.drawLine(x1, y1, int(round(s1x)), int(round(s1y)))
-            painter.drawLine(x1, y1, int(round(s2x)), int(round(s2y)))
-
-            # Arrow head at end
-            e1x = x2 - ux * arrow_len + px * arrow_half
-            e1y = y2 - uy * arrow_len + py * arrow_half
-            e2x = x2 - ux * arrow_len - px * arrow_half
-            e2y = y2 - uy * arrow_len - py * arrow_half
-            painter.drawLine(x2, y2, int(round(e1x)), int(round(e1y)))
-            painter.drawLine(x2, y2, int(round(e2x)), int(round(e2y)))
+            start_cap = str(m.get("start_cap", "head")).strip().lower()
+            end_cap = str(m.get("end_cap", "head")).strip().lower()
+            if start_cap in {"arrow", "block"}:
+                start_cap = "head"
+            if end_cap in {"arrow", "block"}:
+                end_cap = "head"
+            self._draw_measurement_cap(
+                painter, start_cap, x1, y1, ux, uy, px, py, cap_len, cap_half, line_width, line_color
+            )
+            self._draw_measurement_cap(
+                painter, end_cap, x2, y2, -ux, -uy, px, py, cap_len, cap_half, line_width, line_color
+            )
 
             # Label
             if not show_label:
                 continue
+
+            r, g, b, *_ = text_color.getRgb()
+            luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+            outline_color = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
 
             length_nm = length_px * float(nm_per_pixel)
             if self.measurement_unit == "µm":
@@ -472,18 +466,63 @@ class OverlayRenderer:
 
         painter.end()
 
+    def _draw_measurement_cap(
+        self,
+        painter: QPainter,
+        cap_type: str,
+        x: int,
+        y: int,
+        ux: float,
+        uy: float,
+        px: float,
+        py: float,
+        cap_len: float,
+        cap_half: float,
+        line_width: int,
+        color: QColor,
+    ):
+        """Draw a measurement end cap at a point using the requested cap style."""
+        cap = cap_type if cap_type in {"head", "tick", "dot", "none"} else "head"
+        if cap == "none":
+            return
+
+        painter.setPen(QPen(color, max(1, line_width)))
+
+        if cap == "head":
+            c1x = x + ux * cap_len + px * cap_half
+            c1y = y + uy * cap_len + py * cap_half
+            c2x = x + ux * cap_len - px * cap_half
+            c2y = y + uy * cap_len - py * cap_half
+            painter.drawLine(x, y, int(round(c1x)), int(round(c1y)))
+            painter.drawLine(x, y, int(round(c2x)), int(round(c2y)))
+            return
+
+        if cap == "tick":
+            tick_len = max(6.0, cap_half * 1.2)
+            tx1 = x + px * tick_len
+            ty1 = y + py * tick_len
+            tx2 = x - px * tick_len
+            ty2 = y - py * tick_len
+            painter.drawLine(int(round(tx1)), int(round(ty1)), int(round(tx2)), int(round(ty2)))
+            return
+
+        if cap == "dot":
+            radius = max(2.0, line_width * 0.9)
+            old_brush = painter.brush()
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(QRectF(float(x) - radius, float(y) - radius, 2.0 * radius, 2.0 * radius))
+            painter.setBrush(old_brush)
+
     def get_label_centres(self) -> list:
         """Return the image-pixel centre of each committed measurement label.
         Used for hit-testing during label-drag mode.
         Returns list of (cx, cy) floats (or None if degenerate), one per self.measurements.
         """
-        if not self.measurement_show_label:
-            return [None for _ in self.measurements]
-
         results = []
-        line_width = max(1, int(self.measurement_line_width))
-        default_offset = max(16.0, line_width * 3.0)
         for m in self.measurements:
+            if not bool(m.get("show_label", self.measurement_show_label)):
+                results.append(None)
+                continue
             x1, y1 = float(m["start"][0]), float(m["start"][1])
             x2, y2 = float(m["end"][0]), float(m["end"][1])
             dx = x2 - x1
@@ -496,6 +535,8 @@ class OverlayRenderer:
             pnx, pny = -uy, ux          # perpendicular unit vector
             mid_x = (x1 + x2) / 2.0
             mid_y = (y1 + y2) / 2.0
+            line_width = max(1, int(m.get("line_width", self.measurement_line_width)))
+            default_offset = max(16.0, line_width * 3.0)
             ldx = float(m.get("label_offset", (0.0, 0.0))[0])
             ldy = float(m.get("label_offset", (0.0, 0.0))[1])
             cx = mid_x + pnx * default_offset + ldx

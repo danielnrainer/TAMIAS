@@ -1,15 +1,24 @@
 # SynergyED Image Annotate
 
-A PyQt6-based desktop application for processing (mainly) Synergy-ED images with scalebars, aperture overlays, and batch processing capabilities.
-A PyQt6-based desktop application for processing (mainly) Synergy-ED images with scalebars, aperture overlays, particle measurements, and batch processing capabilities.
+A PyQt6 desktop application for processing (mainly) Synergy-ED images with calibrated overlays, particle measurement tools, and batch annotation support.
 
 ## Features
 
 - **Image Processing**: Load TIF/TIFF/RODHyPix images with automatic brightness/contrast adjustment
 - **RODHyPix Support**: Native support for `.rodhypix` detector image files with automatic pixel size extraction
-- **Smart Scalebars**: Calibrated scalebars with customizable appearance (length, thickness, position, colors, font)
+- **Smart Scalebars**: Calibrated scalebars with customizable appearance (length, thickness, position, colors, font, background box)
 - **Aperture Overlay**: Visualize SAED aperture sizes on images
-- **Particle Measurement**: Draw and annotate dimension measurements directly on the image — supports multiple measurements, drag-to-draw, movable labels, and configurable arrow/text styling
+- **Particle Measurement**: Draw and annotate dimensions directly on the image with per-measurement style control
+  - Draw measurement lines
+  - Move full lines
+  - Move labels independently
+  - Configure per-measurement line width, start/end cap style, label visibility, line color, and text color
+  - Multi-select rows and edit selected measurements in one action
+  - Apply current style to selected rows or to all rows
+- **Measurement Property Table**: Measurements are listed in a multi-column table (length, style, caps, colors, labels)
+- **Clickable Color Swatches**: Color swatches are shown in measurement rows and beside color-picker buttons for quick visual feedback
+- **Theme Support**: Light, dark, and auto (system) theme modes
+- **Resizable Workspace**: Adjustable splitter between image pane and control pane
 - **Batch Processing**: Process multiple images with consistent settings
 - **Imaging Presets**: Store and manage pixel size calibrations for different imaging modes
 - **Compact UI**: Laptop-friendly interface with collapsible sections and scrollable controls
@@ -59,7 +68,12 @@ python SynergyED-img_annotate.py
 2. Select imaging mode preset or enter pixel size manually
 3. Adjust brightness/contrast (Auto Adjust recommended)
 4. Configure scalebar settings (length, position, colors)
-5. Optionally add particle measurements: enable **Particle Measurement**, click **✏ Draw Measurement** and drag; use **☰ Move Label** to reposition labels
+5. Optionally add particle measurements:
+  - Enable **Particle Measurement**
+  - Click **✏ Draw Measurement** and drag
+  - Use **↔ Move Line** to reposition a line
+  - Use **☰ Move Label** to reposition labels
+  - Select one or more rows in the measurement table to edit selected styles together
 6. Export image (Ctrl+S)
 
 **Batch Processing:**
@@ -85,9 +99,10 @@ SynergyED-img_annotate/
 ## Requirements
 
 - Python 3.8+
-- PyQt6 >= 6.10.0
-- NumPy >= 2.3.4
-- Pillow >= 12.0.0
+- PyQt6 >= 6.5, < 7
+- NumPy >= 1.24, < 3
+- Pillow >= 10, < 13
+- PyInstaller >= 6.0 (for building executables)
 
 ### Optional Dependencies
 
@@ -107,7 +122,7 @@ SynergyED-img_annotate/
   - Pure Python fallback for compatibility
 - **Architecture**: Modular design with separate core, GUI, and utility modules
 - **UI**: Collapsible sections for efficient screen space management
-- **Particle Measurement**: Click-and-drag double-headed arrows with auto-computed length labels; multiple annotations supported simultaneously; label positions stored as per-measurement image-pixel offsets and fully repositionable via drag
+- **Particle Measurement**: Click-and-drag lines with auto-computed length labels; per-measurement line/text styles, cap styles, width, and label visibility; label positions stored as per-measurement image-pixel offsets and fully repositionable via drag
 
 ## Acknowledgments
 

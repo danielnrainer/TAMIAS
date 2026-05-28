@@ -4,6 +4,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 # Collect all PyQt6 submodules to avoid missing plugin issues on some systems
 hidden_pyqt6 = collect_submodules('PyQt6')
+hidden_pil = collect_submodules('PIL')
 
 block_cipher = None
 
@@ -20,7 +21,7 @@ a = Analysis(
         ('gui', 'gui'),
         ('utils', 'utils'),
     ],
-    hiddenimports=hidden_pyqt6 + [
+    hiddenimports=hidden_pyqt6 + hidden_pil + [
         'PyQt6.QtCore', 
         'PyQt6.QtGui', 
         'PyQt6.QtWidgets',
@@ -30,6 +31,8 @@ a = Analysis(
         'utils.preset_manager',
         'numpy',
         'PIL',
+        'PIL.Image',
+        'PIL.ImageFile',
     ],
     hookspath=[],
     hooksconfig={},

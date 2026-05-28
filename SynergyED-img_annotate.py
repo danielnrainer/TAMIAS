@@ -16,10 +16,11 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSlider, QFileDialog, QComboBox, QDoubleSpinBox,
     QGroupBox, QCheckBox, QMessageBox, QSpinBox, QDialog, QListWidget,
-    QProgressDialog, QScrollArea
+    QTableWidget, QTableWidgetItem, QAbstractItemView,
+    QProgressDialog, QScrollArea, QSplitter, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QPixmap, QImage, QAction, QActionGroup, QColor, QFont, QPalette
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QModelIndex, QSize
+from PyQt6.QtGui import QPixmap, QImage, QAction, QActionGroup, QColor, QFont, QPalette, QBrush, QIcon
 from PyQt6.QtWidgets import QColorDialog, QFontDialog
 
 # Helpers
@@ -81,6 +82,31 @@ class ImageDisplayLabel(QLabel):
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
         super().mouseReleaseEvent(event)
 
+
+class ClickClearTableWidget(QTableWidget):
+    """A QTableWidget that clears selection when clicking empty table space."""
+
+    def mousePressEvent(self, event):  # type: ignore[override]
+        idx = self.indexAt(event.pos())
+        if not idx.isValid():
+            self.clearSelection()
+            self.setCurrentIndex(QModelIndex())
+        super().mousePressEvent(event)
+
+    def selected_rows(self) -> list[int]:
+        """Return selected row indices in ascending order."""
+        rows = {idx.row() for idx in self.selectionModel().selectedRows()}
+        return sorted(rows)
+
+
+def set_color_button_indicator(button: QPushButton, color: QColor):
+    """Show a small color swatch icon on color-picker buttons."""
+    swatch_size = 14
+    pixmap = QPixmap(swatch_size, swatch_size)
+    pixmap.fill(QColor(color))
+    button.setIcon(QIcon(pixmap))
+    button.setIconSize(QSize(swatch_size, swatch_size))
+
 # Import our modules
 from core.image_processor import ImageProcessor
 from core.overlay_renderer import OverlayRenderer
@@ -112,11 +138,11 @@ class TEMImageEditor(QMainWindow):
         self._label_drag_index: Optional[int] = None        # which measurement
         self._label_drag_origin_img: Optional[tuple[float, float]] = None  # img coords at press
         self._label_drag_offset_start: tuple[float, float] = (0.0, 0.0)   # offset at drag start
-        self._arrow_drag_active = False
-        self._arrow_drag_index: Optional[int] = None
-        self._arrow_drag_origin_img: Optional[tuple[float, float]] = None
-        self._arrow_drag_start_start: tuple[float, float] = (0.0, 0.0)
-        self._arrow_drag_start_end: tuple[float, float] = (0.0, 0.0)
+        self._line_drag_active = False
+        self._line_drag_index: Optional[int] = None
+        self._line_drag_origin_img: Optional[tuple[float, float]] = None
+        self._line_drag_start_start: tuple[float, float] = (0.0, 0.0)
+        self._line_drag_start_end: tuple[float, float] = (0.0, 0.0)
         self._scalebar_drag_active = False
         self._scalebar_drag_origin_img: Optional[tuple[float, float]] = None
         self._scalebar_drag_offset_start: tuple[float, float] = (0.0, 0.0)
@@ -264,12 +290,14 @@ class TEMImageEditor(QMainWindow):
         self.setCentralWidget(central_widget)
         
         main_layout = QHBoxLayout()
-        
+
         # Left side - Image display
+        image_widget = QWidget()
         image_layout = QVBoxLayout()
         
         self.image_label = ImageDisplayLabel()
-        self.image_label.setMinimumSize(800, 600)
+        self.image_label.setMinimumSize(200, 200)
+        self.image_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.image_label.setStyleSheet(
             "QLabel { background-color: #2b2b2b; border: 2px solid #555; color: #e6e6e6; }"
         )
@@ -284,14 +312,13 @@ class TEMImageEditor(QMainWindow):
         self.file_info_label = QLabel("No file loaded")
         self.file_info_label.setStyleSheet("QLabel { color: palette(mid); padding: 5px; }")
         image_layout.addWidget(self.file_info_label)
-        
-        main_layout.addLayout(image_layout, stretch=3)
+        image_widget.setLayout(image_layout)
         
         # Right side - Controls in a scroll area
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll_area.setMinimumWidth(350)
+        scroll_area.setMinimumWidth(260)
         
         controls_widget = QWidget()
         controls_layout = QVBoxLayout()
@@ -331,8 +358,25 @@ class TEMImageEditor(QMainWindow):
         
         # Set the scroll area's widget and add to main layout
         scroll_area.setWidget(controls_widget)
-        main_layout.addWidget(scroll_area, stretch=1)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(image_widget)
+        splitter.addWidget(scroll_area)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([900, 350])
+        splitter.splitterMoved.connect(self._on_main_splitter_moved)
+        self.main_splitter = splitter
+
+        main_layout.addWidget(splitter)
         central_widget.setLayout(main_layout)
+
+    def _on_main_splitter_moved(self, _pos: int, _index: int):
+        """Rescale the displayed image when pane sizes change via splitter drag."""
+        if self.image_processor.has_image():
+            self.update_display()
         
     def _setup_preset_controls(self, parent_layout):
         """Setup imaging mode preset controls."""
@@ -500,6 +544,7 @@ class TEMImageEditor(QMainWindow):
         bar_color_layout.addWidget(QLabel("Bar Color:"))
         self.bar_color_btn = QPushButton("Choose Color…")
         self.bar_color_btn.clicked.connect(self.choose_bar_color)
+        set_color_button_indicator(self.bar_color_btn, self.overlay_renderer.bar_color)
         bar_color_layout.addWidget(self.bar_color_btn)
         scalebar_layout.addLayout(bar_color_layout)
         
@@ -508,6 +553,7 @@ class TEMImageEditor(QMainWindow):
         text_color_layout.addWidget(QLabel("Text Color:"))
         self.text_color_btn = QPushButton("Choose Color…")
         self.text_color_btn.clicked.connect(self.choose_text_color)
+        set_color_button_indicator(self.text_color_btn, self.overlay_renderer.text_color)
         text_color_layout.addWidget(self.text_color_btn)
         scalebar_layout.addLayout(text_color_layout)
         
@@ -530,6 +576,7 @@ class TEMImageEditor(QMainWindow):
         bg_controls_layout = QHBoxLayout()
         self.bg_color_btn = QPushButton("Choose Color…")
         self.bg_color_btn.clicked.connect(self.choose_bg_color)
+        set_color_button_indicator(self.bg_color_btn, self.overlay_renderer.scalebar_bg_color)
         bg_controls_layout.addWidget(self.bg_color_btn)
         
         bg_controls_layout.addWidget(QLabel("Opacity:"))
@@ -576,6 +623,7 @@ class TEMImageEditor(QMainWindow):
         aperture_color_layout.addWidget(QLabel("Circle color:"))
         self.aperture_color_btn = QPushButton("Choose Color...")
         self.aperture_color_btn.clicked.connect(self.choose_aperture_color)
+        set_color_button_indicator(self.aperture_color_btn, self.overlay_renderer.aperture_color)
         aperture_color_layout.addWidget(self.aperture_color_btn)
         aperture_layout.addLayout(aperture_color_layout)
         
@@ -614,13 +662,13 @@ class TEMImageEditor(QMainWindow):
         self.move_label_btn.toggled.connect(self.on_label_drag_mode_toggled)
         measurement_layout.addWidget(self.move_label_btn)
 
-        self.move_arrow_btn = QPushButton("↔  Move Arrow")
-        self.move_arrow_btn.setCheckable(True)
-        self.move_arrow_btn.setToolTip(
-            "Click and drag a measurement arrow to move the full annotation"
+        self.move_line_btn = QPushButton("↔  Move Line")
+        self.move_line_btn.setCheckable(True)
+        self.move_line_btn.setToolTip(
+            "Click and drag a measurement line to move the full annotation"
         )
-        self.move_arrow_btn.toggled.connect(self.on_arrow_drag_mode_toggled)
-        measurement_layout.addWidget(self.move_arrow_btn)
+        self.move_line_btn.toggled.connect(self.on_line_drag_mode_toggled)
+        measurement_layout.addWidget(self.move_line_btn)
 
         # Style controls
         unit_layout = QHBoxLayout()
@@ -632,7 +680,7 @@ class TEMImageEditor(QMainWindow):
         measurement_layout.addLayout(unit_layout)
 
         thickness_layout = QHBoxLayout()
-        thickness_layout.addWidget(QLabel("Arrow Thickness (px):"))
+        thickness_layout.addWidget(QLabel("Line Width (px):"))
         self.measurement_thickness_spinbox = QSpinBox()
         self.measurement_thickness_spinbox.setRange(1, 20)
         self.measurement_thickness_spinbox.setValue(self.overlay_renderer.measurement_line_width)
@@ -640,26 +688,62 @@ class TEMImageEditor(QMainWindow):
         thickness_layout.addWidget(self.measurement_thickness_spinbox)
         measurement_layout.addLayout(thickness_layout)
 
-        arrow_color_layout = QHBoxLayout()
-        arrow_color_layout.addWidget(QLabel("Arrow Color:"))
-        self.measurement_arrow_color_btn = QPushButton("Choose Color...")
-        self.measurement_arrow_color_btn.clicked.connect(self.choose_measurement_arrow_color)
-        arrow_color_layout.addWidget(self.measurement_arrow_color_btn)
-        measurement_layout.addLayout(arrow_color_layout)
+        line_color_layout = QHBoxLayout()
+        line_color_layout.addWidget(QLabel("Line Color:"))
+        self.measurement_line_color_btn = QPushButton("Choose Color...")
+        self.measurement_line_color_btn.clicked.connect(self.choose_measurement_line_color)
+        set_color_button_indicator(self.measurement_line_color_btn, self.overlay_renderer.measurement_line_color)
+        line_color_layout.addWidget(self.measurement_line_color_btn)
+        measurement_layout.addLayout(line_color_layout)
 
         text_color_layout = QHBoxLayout()
         text_color_layout.addWidget(QLabel("Text Color:"))
         self.measurement_text_color_btn = QPushButton("Choose Color...")
         self.measurement_text_color_btn.clicked.connect(self.choose_measurement_text_color)
+        set_color_button_indicator(self.measurement_text_color_btn, self.overlay_renderer.measurement_text_color)
         text_color_layout.addWidget(self.measurement_text_color_btn)
         measurement_layout.addLayout(text_color_layout)
 
+        end_style_layout = QHBoxLayout()
+        end_style_layout.addWidget(QLabel("Start Cap:"))
+        self.measurement_start_end_combo = QComboBox()
+        self.measurement_start_end_combo.addItems(["head", "tick", "dot", "none"])
+        self.measurement_start_end_combo.currentTextChanged.connect(self._on_selected_measurement_end_style_changed)
+        end_style_layout.addWidget(self.measurement_start_end_combo)
+
+        end_style_layout.addWidget(QLabel("End Cap:"))
+        self.measurement_end_end_combo = QComboBox()
+        self.measurement_end_end_combo.addItems(["head", "tick", "dot", "none"])
+        self.measurement_end_end_combo.currentTextChanged.connect(self._on_selected_measurement_end_style_changed)
+        end_style_layout.addWidget(self.measurement_end_end_combo)
+        measurement_layout.addLayout(end_style_layout)
+        
         # Measurement list
         measurement_layout.addWidget(QLabel("Measurements:"))
-        self.measurement_list = QListWidget()
-        self.measurement_list.setMaximumHeight(130)
-        self.measurement_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        measurement_layout.addWidget(self.measurement_list)
+        self.measurement_table = ClickClearTableWidget()
+        self.measurement_table.setColumnCount(8)
+        self.measurement_table.setHorizontalHeaderLabels([
+            "#", "Length", "Label", "Line", "Text", "Width", "Start", "End"
+        ])
+        self.measurement_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.measurement_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.measurement_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.measurement_table.setMaximumHeight(170)
+        self.measurement_table.currentCellChanged.connect(
+            lambda current_row, _current_col, _prev_row, _prev_col: self._on_measurement_selection_changed(current_row)
+        )
+        self.measurement_table.cellClicked.connect(self._on_measurement_table_cell_clicked)
+        measurement_layout.addWidget(self.measurement_table)
+
+
+        apply_all_btn = QPushButton("Apply Style to All")
+        apply_all_btn.clicked.connect(self.apply_current_measurement_style_to_all)
+        apply_selected_btn = QPushButton("Apply Style to Selected")
+        apply_selected_btn.clicked.connect(self.apply_current_measurement_style_to_selected)
+        apply_btn_layout = QHBoxLayout()
+        apply_btn_layout.addWidget(apply_selected_btn)
+        apply_btn_layout.addWidget(apply_all_btn)
+        measurement_layout.addLayout(apply_btn_layout)
 
         list_btn_layout = QHBoxLayout()
         remove_btn = QPushButton("Remove Selected")
@@ -679,8 +763,10 @@ class TEMImageEditor(QMainWindow):
 
         # Start disabled until measurement overlay is enabled.
         self.draw_measurement_btn.setEnabled(False)
-        self.move_arrow_btn.setEnabled(False)
+        self.move_line_btn.setEnabled(False)
         self.move_label_btn.setEnabled(False)
+        self.measurement_start_end_combo.setEnabled(False)
+        self.measurement_end_end_combo.setEnabled(False)
 
         measurement_box.setContentLayout(measurement_layout)
         parent_layout.addWidget(measurement_box)
@@ -737,8 +823,8 @@ class TEMImageEditor(QMainWindow):
                 self.overlay_renderer.measurements.clear()
                 self.overlay_renderer.measurement_preview = None
                 self._draw_preview_start = None
-                if hasattr(self, 'measurement_list'):
-                    self.measurement_list.clear()
+                if hasattr(self, 'measurement_table'):
+                    self.measurement_table.setRowCount(0)
 
                 self._refresh_scale_information()
             else:
@@ -910,6 +996,7 @@ class TEMImageEditor(QMainWindow):
         color = QColorDialog.getColor(self.overlay_renderer.bar_color, self, "Choose Scalebar Bar Color")
         if color.isValid():
             self.overlay_renderer.bar_color = color
+            set_color_button_indicator(self.bar_color_btn, self.overlay_renderer.bar_color)
             self.update_display()
     
     def choose_text_color(self):
@@ -917,6 +1004,7 @@ class TEMImageEditor(QMainWindow):
         color = QColorDialog.getColor(self.overlay_renderer.text_color, self, "Choose Scalebar Text Color")
         if color.isValid():
             self.overlay_renderer.text_color = color
+            set_color_button_indicator(self.text_color_btn, self.overlay_renderer.text_color)
             self.update_display()
     
     def choose_font(self):
@@ -950,6 +1038,7 @@ class TEMImageEditor(QMainWindow):
         color = QColorDialog.getColor(self.overlay_renderer.scalebar_bg_color, self, "Choose Background Color")
         if color.isValid():
             self.overlay_renderer.scalebar_bg_color = color
+            set_color_button_indicator(self.bg_color_btn, self.overlay_renderer.scalebar_bg_color)
             self.update_display()
     
     def on_bg_opacity_changed(self, value: int):
@@ -978,6 +1067,7 @@ class TEMImageEditor(QMainWindow):
         color = QColorDialog.getColor(self.overlay_renderer.aperture_color, self, "Choose Aperture Color")
         if color.isValid():
             self.overlay_renderer.aperture_color = color
+            set_color_button_indicator(self.aperture_color_btn, self.overlay_renderer.aperture_color)
             self.update_display()
 
     def on_measurement_toggled(self, state):
@@ -985,13 +1075,14 @@ class TEMImageEditor(QMainWindow):
         enabled = (state == Qt.CheckState.Checked.value)
         self.overlay_renderer.measurement_enabled = enabled
         self.draw_measurement_btn.setEnabled(enabled)
-        self.move_arrow_btn.setEnabled(enabled)
-        self.move_label_btn.setEnabled(enabled and self.overlay_renderer.measurement_show_label)
+        self.move_line_btn.setEnabled(enabled)
+        self.move_label_btn.setEnabled(enabled and self._has_any_visible_measurement_labels())
+        self._sync_measurement_end_style_controls_enabled()
         if not enabled:
             if self.draw_measurement_btn.isChecked():
                 self.draw_measurement_btn.setChecked(False)
-            if self.move_arrow_btn.isChecked():
-                self.move_arrow_btn.setChecked(False)
+            if self.move_line_btn.isChecked():
+                self.move_line_btn.setChecked(False)
             if self.move_label_btn.isChecked():
                 self.move_label_btn.setChecked(False)
         self.update_display()
@@ -999,9 +1090,16 @@ class TEMImageEditor(QMainWindow):
     def on_measurement_changed(self):
         """Handle measurement style changes (unit, thickness, label visibility)."""
         self.overlay_renderer.measurement_unit = self.measurement_unit_combo.currentText()
-        self.overlay_renderer.measurement_line_width = self.measurement_thickness_spinbox.value()
-        self.overlay_renderer.measurement_show_label = self.measurement_label_checkbox.isChecked()
-        move_labels_enabled = self.overlay_renderer.measurement_show_label
+        selected_rows = self._get_selected_measurement_rows()
+        if selected_rows:
+            for row in selected_rows:
+                if 0 <= row < len(self.overlay_renderer.measurements):
+                    self.overlay_renderer.measurements[row]["line_width"] = self.measurement_thickness_spinbox.value()
+                    self.overlay_renderer.measurements[row]["show_label"] = self.measurement_label_checkbox.isChecked()
+        else:
+            self.overlay_renderer.measurement_line_width = self.measurement_thickness_spinbox.value()
+            self.overlay_renderer.measurement_show_label = self.measurement_label_checkbox.isChecked()
+        move_labels_enabled = self._has_any_visible_measurement_labels()
         self.move_label_btn.setEnabled(move_labels_enabled)
         if not move_labels_enabled and self.move_label_btn.isChecked():
             self.move_label_btn.setChecked(False)
@@ -1009,25 +1107,214 @@ class TEMImageEditor(QMainWindow):
                 "Length labels hidden. Enable 'Include Length Label' to move label positions."
             )
         self._refresh_measurements_list()
+        for row in selected_rows:
+            if 0 <= row < self.measurement_table.rowCount():
+                self.measurement_table.selectRow(row)
+        self._sync_measurement_end_style_controls_enabled()
         self.update_display()
 
-    def choose_measurement_arrow_color(self):
-        """Choose measurement arrow color."""
+    def _sync_measurement_end_style_controls_enabled(self):
+        """Enable cap-style controls only when overlay is on and a measurement is selected."""
+        has_selection = len(self._get_selected_measurement_rows()) > 0
+        enabled = self.overlay_renderer.measurement_enabled and has_selection
+        self.measurement_start_end_combo.setEnabled(enabled)
+        self.measurement_end_end_combo.setEnabled(enabled)
+
+    def _on_measurement_selection_changed(self, row: int):
+        """Load selected measurement cap styles into the end-style controls."""
+        if row < 0 or row >= len(self.overlay_renderer.measurements):
+            self.measurement_label_checkbox.blockSignals(True)
+            self.measurement_label_checkbox.setChecked(self.overlay_renderer.measurement_show_label)
+            self.measurement_label_checkbox.blockSignals(False)
+            set_color_button_indicator(self.measurement_line_color_btn, self.overlay_renderer.measurement_line_color)
+            set_color_button_indicator(self.measurement_text_color_btn, self.overlay_renderer.measurement_text_color)
+            self.move_label_btn.setEnabled(self.overlay_renderer.measurement_enabled and self._has_any_visible_measurement_labels())
+            self._sync_measurement_end_style_controls_enabled()
+            return
+
+        m = self.overlay_renderer.measurements[row]
+        start_cap = str(m.get("start_cap", "head")).strip().lower()
+        end_cap = str(m.get("end_cap", "head")).strip().lower()
+        show_label = bool(m.get("show_label", self.overlay_renderer.measurement_show_label))
+        line_width = int(m.get("line_width", self.overlay_renderer.measurement_line_width))
+        if start_cap not in {"head", "tick", "dot", "none"}:
+            start_cap = "head"
+        if end_cap not in {"head", "tick", "dot", "none"}:
+            end_cap = "head"
+
+        self.measurement_label_checkbox.blockSignals(True)
+        self.measurement_label_checkbox.setChecked(show_label)
+        self.measurement_label_checkbox.blockSignals(False)
+        self.measurement_thickness_spinbox.blockSignals(True)
+        self.measurement_thickness_spinbox.setValue(max(1, min(20, line_width)))
+        self.measurement_thickness_spinbox.blockSignals(False)
+        self.measurement_start_end_combo.blockSignals(True)
+        self.measurement_end_end_combo.blockSignals(True)
+        self.measurement_start_end_combo.setCurrentText(start_cap)
+        self.measurement_end_end_combo.setCurrentText(end_cap)
+        self.measurement_start_end_combo.blockSignals(False)
+        self.measurement_end_end_combo.blockSignals(False)
+        line_color = QColor(m.get("line_color", self.overlay_renderer.measurement_line_color))
+        text_color = QColor(m.get("text_color", self.overlay_renderer.measurement_text_color))
+        set_color_button_indicator(self.measurement_line_color_btn, line_color)
+        set_color_button_indicator(self.measurement_text_color_btn, text_color)
+        self.move_label_btn.setEnabled(self.overlay_renderer.measurement_enabled and self._has_any_visible_measurement_labels())
+        self._sync_measurement_end_style_controls_enabled()
+
+    def _on_selected_measurement_end_style_changed(self):
+        """Persist end-style changes for the currently selected measurement."""
+        selected_rows = self._get_selected_measurement_rows()
+        if not selected_rows:
+            return
+        for row in selected_rows:
+            if 0 <= row < len(self.overlay_renderer.measurements):
+                self.overlay_renderer.measurements[row]["start_cap"] = self.measurement_start_end_combo.currentText()
+                self.overlay_renderer.measurements[row]["end_cap"] = self.measurement_end_end_combo.currentText()
+        self._refresh_measurements_list()
+        for row in selected_rows:
+            if 0 <= row < self.measurement_table.rowCount():
+                self.measurement_table.selectRow(row)
+        self.update_display()
+
+    def _on_measurement_table_cell_clicked(self, row: int, col: int):
+        """Open color pickers directly when clicking color swatches in the table."""
+        if row < 0 or row >= len(self.overlay_renderer.measurements):
+            return
+        if col == 3:
+            self.choose_measurement_line_color(row)
+        elif col == 4:
+            self.choose_measurement_text_color(row)
+
+    def _get_selected_measurement_rows(self) -> list[int]:
+        """Return selected measurement rows in ascending order."""
+        if not hasattr(self, 'measurement_table'):
+            return []
+        rows = self.measurement_table.selected_rows()
+        return [row for row in rows if 0 <= row < len(self.overlay_renderer.measurements)]
+
+    def choose_measurement_line_color(self, row_override: Optional[int] = None):
+        """Choose measurement line color."""
+        if row_override is not None:
+            selected_rows = self._get_selected_measurement_rows()
+            target_rows = selected_rows if row_override in selected_rows else [row_override]
+        else:
+            target_rows = self._get_selected_measurement_rows()
+
+        initial = self.overlay_renderer.measurement_line_color
+        if target_rows and 0 <= target_rows[0] < len(self.overlay_renderer.measurements):
+            initial = QColor(self.overlay_renderer.measurements[target_rows[0]].get("line_color", initial))
         color = QColorDialog.getColor(
-            self.overlay_renderer.measurement_arrow_color, self, "Choose Measurement Arrow Color"
+            initial, self, "Choose Measurement Line Color"
         )
         if color.isValid():
-            self.overlay_renderer.measurement_arrow_color = color
+            if target_rows:
+                for row in target_rows:
+                    if 0 <= row < len(self.overlay_renderer.measurements):
+                        self.overlay_renderer.measurements[row]["line_color"] = QColor(color)
+                self._refresh_measurements_list()
+                for row in target_rows:
+                    if 0 <= row < self.measurement_table.rowCount():
+                        self.measurement_table.selectRow(row)
+                set_color_button_indicator(self.measurement_line_color_btn, color)
+            else:
+                self.overlay_renderer.measurement_line_color = color
+                set_color_button_indicator(self.measurement_line_color_btn, self.overlay_renderer.measurement_line_color)
             self.update_display()
 
-    def choose_measurement_text_color(self):
+    def choose_measurement_text_color(self, row_override: Optional[int] = None):
         """Choose measurement label color."""
+        if row_override is not None:
+            selected_rows = self._get_selected_measurement_rows()
+            target_rows = selected_rows if row_override in selected_rows else [row_override]
+        else:
+            target_rows = self._get_selected_measurement_rows()
+
+        initial = self.overlay_renderer.measurement_text_color
+        if target_rows and 0 <= target_rows[0] < len(self.overlay_renderer.measurements):
+            initial = QColor(self.overlay_renderer.measurements[target_rows[0]].get("text_color", initial))
         color = QColorDialog.getColor(
-            self.overlay_renderer.measurement_text_color, self, "Choose Measurement Text Color"
+            initial, self, "Choose Measurement Text Color"
         )
         if color.isValid():
-            self.overlay_renderer.measurement_text_color = color
+            if target_rows:
+                for row in target_rows:
+                    if 0 <= row < len(self.overlay_renderer.measurements):
+                        self.overlay_renderer.measurements[row]["text_color"] = QColor(color)
+                self._refresh_measurements_list()
+                for row in target_rows:
+                    if 0 <= row < self.measurement_table.rowCount():
+                        self.measurement_table.selectRow(row)
+                set_color_button_indicator(self.measurement_text_color_btn, color)
+            else:
+                self.overlay_renderer.measurement_text_color = color
+                set_color_button_indicator(self.measurement_text_color_btn, self.overlay_renderer.measurement_text_color)
             self.update_display()
+
+    def apply_current_measurement_style_to_selected(self):
+        """Apply currently selected style controls to selected measurements only."""
+        selected_rows = self._get_selected_measurement_rows()
+        if not selected_rows:
+            self.measurement_status_label.setText("Select one or more measurements first.")
+            return
+
+        line_color = QColor(self.overlay_renderer.measurement_line_color)
+        text_color = QColor(self.overlay_renderer.measurement_text_color)
+        first_row = selected_rows[0]
+        if 0 <= first_row < len(self.overlay_renderer.measurements):
+            selected = self.overlay_renderer.measurements[first_row]
+            line_color = QColor(selected.get("line_color", line_color))
+            text_color = QColor(selected.get("text_color", text_color))
+
+        show_label = self.measurement_label_checkbox.isChecked()
+        line_width = self.measurement_thickness_spinbox.value()
+        start_cap = self.measurement_start_end_combo.currentText()
+        end_cap = self.measurement_end_end_combo.currentText()
+
+        for row in selected_rows:
+            if 0 <= row < len(self.overlay_renderer.measurements):
+                m = self.overlay_renderer.measurements[row]
+                m["show_label"] = bool(show_label)
+                m["line_width"] = int(line_width)
+                m["line_color"] = QColor(line_color)
+                m["text_color"] = QColor(text_color)
+                m["start_cap"] = start_cap
+                m["end_cap"] = end_cap
+
+        self._refresh_measurements_list()
+        for row in selected_rows:
+            if 0 <= row < self.measurement_table.rowCount():
+                self.measurement_table.selectRow(row)
+        self.update_display()
+
+    def apply_current_measurement_style_to_all(self):
+        """Apply currently selected style controls to all measurements."""
+        if not self.overlay_renderer.measurements:
+            return
+        line_color = QColor(self.overlay_renderer.measurement_line_color)
+        text_color = QColor(self.overlay_renderer.measurement_text_color)
+        row = self.measurement_table.currentRow() if hasattr(self, 'measurement_table') else -1
+        if 0 <= row < len(self.overlay_renderer.measurements):
+            selected = self.overlay_renderer.measurements[row]
+            line_color = QColor(selected.get("line_color", line_color))
+            text_color = QColor(selected.get("text_color", text_color))
+
+        show_label = self.measurement_label_checkbox.isChecked()
+        line_width = self.measurement_thickness_spinbox.value()
+        start_cap = self.measurement_start_end_combo.currentText()
+        end_cap = self.measurement_end_end_combo.currentText()
+
+        for m in self.overlay_renderer.measurements:
+            m["show_label"] = bool(show_label)
+            m["line_width"] = int(line_width)
+            m["line_color"] = QColor(line_color)
+            m["text_color"] = QColor(text_color)
+            m["start_cap"] = start_cap
+            m["end_cap"] = end_cap
+
+        self._refresh_measurements_list()
+        if self.overlay_renderer.measurements:
+            self.measurement_table.selectRow(0 if row < 0 else min(row, len(self.overlay_renderer.measurements) - 1))
+        self.update_display()
 
     # --- Draw-mode drag handlers ---
 
@@ -1041,15 +1328,15 @@ class TEMImageEditor(QMainWindow):
             self.move_label_btn.setChecked(False)
             self.move_label_btn.blockSignals(False)
             self._label_drag_active = False
-            self.move_arrow_btn.blockSignals(True)
-            self.move_arrow_btn.setChecked(False)
-            self.move_arrow_btn.blockSignals(False)
-            self._arrow_drag_active = False
+            self.move_line_btn.blockSignals(True)
+            self.move_line_btn.setChecked(False)
+            self.move_line_btn.blockSignals(False)
+            self._line_drag_active = False
             self.move_scalebar_btn.blockSignals(True)
             self.move_scalebar_btn.setChecked(False)
             self.move_scalebar_btn.blockSignals(False)
             self._scalebar_drag_active = False
-            self._arrow_drag_index = None
+            self._line_drag_index = None
             self._scalebar_drag_origin_img = None
             # Ensure the annotation overlay is active when drawing starts
             if not self.measurement_checkbox.isChecked():
@@ -1073,10 +1360,10 @@ class TEMImageEditor(QMainWindow):
             self.draw_measurement_btn.setChecked(False)
             self.draw_measurement_btn.blockSignals(False)
             self._draw_mode_active = False
-            self.move_arrow_btn.blockSignals(True)
-            self.move_arrow_btn.setChecked(False)
-            self.move_arrow_btn.blockSignals(False)
-            self._arrow_drag_active = False
+            self.move_line_btn.blockSignals(True)
+            self.move_line_btn.setChecked(False)
+            self.move_line_btn.blockSignals(False)
+            self._line_drag_active = False
             self.move_scalebar_btn.blockSignals(True)
             self.move_scalebar_btn.setChecked(False)
             self.move_scalebar_btn.blockSignals(False)
@@ -1089,9 +1376,9 @@ class TEMImageEditor(QMainWindow):
             self._label_drag_origin_img = None
             self.measurement_status_label.setText("Move Label mode off.")
 
-    def on_arrow_drag_mode_toggled(self, checked: bool):
-        """Toggle arrow-drag mode (move full measurement arrows)."""
-        self._arrow_drag_active = checked
+    def on_line_drag_mode_toggled(self, checked: bool):
+        """Toggle line-drag mode (move full measurement lines)."""
+        self._line_drag_active = checked
         self._refresh_image_interaction_mode()
         if checked:
             self.draw_measurement_btn.blockSignals(True)
@@ -1107,12 +1394,12 @@ class TEMImageEditor(QMainWindow):
             self.move_scalebar_btn.blockSignals(False)
             self._scalebar_drag_active = False
             self.measurement_status_label.setText(
-                "Move Arrow mode ON — click and drag a measurement arrow to reposition it."
+                "Move Line mode ON — click and drag a measurement line to reposition it."
             )
         else:
-            self._arrow_drag_index = None
-            self._arrow_drag_origin_img = None
-            self.measurement_status_label.setText("Move Arrow mode off.")
+            self._line_drag_index = None
+            self._line_drag_origin_img = None
+            self.measurement_status_label.setText("Move Line mode off.")
 
     def on_scalebar_drag_mode_toggled(self, checked: bool):
         """Toggle drag mode for moving the full scalebar box."""
@@ -1127,10 +1414,10 @@ class TEMImageEditor(QMainWindow):
             self.move_label_btn.setChecked(False)
             self.move_label_btn.blockSignals(False)
             self._label_drag_active = False
-            self.move_arrow_btn.blockSignals(True)
-            self.move_arrow_btn.setChecked(False)
-            self.move_arrow_btn.blockSignals(False)
-            self._arrow_drag_active = False
+            self.move_line_btn.blockSignals(True)
+            self.move_line_btn.setChecked(False)
+            self.move_line_btn.blockSignals(False)
+            self._line_drag_active = False
             self.measurement_status_label.setText(
                 "Move Scalebar mode ON — drag the scalebar box to reposition it."
             )
@@ -1143,7 +1430,7 @@ class TEMImageEditor(QMainWindow):
         if self._draw_mode_active:
             self.image_label.set_draw_mode(True)
             return
-        if self._label_drag_active or self._arrow_drag_active or self._scalebar_drag_active:
+        if self._label_drag_active or self._line_drag_active or self._scalebar_drag_active:
             self.image_label.set_label_drag_mode(True)
             return
         self.image_label.set_draw_mode(False)
@@ -1155,8 +1442,8 @@ class TEMImageEditor(QMainWindow):
         if self._scalebar_drag_active:
             self._start_scalebar_drag(x, y)
             return
-        if self._arrow_drag_active:
-            self._start_arrow_drag(x, y)
+        if self._line_drag_active:
+            self._start_line_drag(x, y)
             return
         if self._label_drag_active:
             self._start_label_drag(x, y)
@@ -1174,8 +1461,8 @@ class TEMImageEditor(QMainWindow):
         if self._scalebar_drag_active:
             self._update_scalebar_drag(x, y)
             return
-        if self._arrow_drag_active:
-            self._update_arrow_drag(x, y)
+        if self._line_drag_active:
+            self._update_line_drag(x, y)
             return
         if self._label_drag_active:
             self._update_label_drag(x, y)
@@ -1195,8 +1482,8 @@ class TEMImageEditor(QMainWindow):
         if self._scalebar_drag_active:
             self._finish_scalebar_drag(x, y)
             return
-        if self._arrow_drag_active:
-            self._finish_arrow_drag(x, y)
+        if self._line_drag_active:
+            self._finish_line_drag(x, y)
             return
         if self._label_drag_active:
             self._finish_label_drag(x, y)
@@ -1211,8 +1498,20 @@ class TEMImageEditor(QMainWindow):
         self._draw_preview_start = None
         self.overlay_renderer.measurement_preview = None
         if np.hypot(float(end[0] - start[0]), float(end[1] - start[1])) > 3:
-            self.overlay_renderer.measurements.append({"start": start, "end": end})
+            self.overlay_renderer.measurements.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "start_cap": "head",
+                    "end_cap": "head",
+                    "show_label": bool(self.overlay_renderer.measurement_show_label),
+                    "line_color": QColor(self.overlay_renderer.measurement_line_color),
+                    "text_color": QColor(self.overlay_renderer.measurement_text_color),
+                    "line_width": int(self.overlay_renderer.measurement_line_width),
+                }
+            )
             self._refresh_measurements_list()
+            self.measurement_table.selectRow(len(self.overlay_renderer.measurements) - 1)
         self.update_display()
 
     # --- Label-drag helpers ---
@@ -1267,9 +1566,9 @@ class TEMImageEditor(QMainWindow):
         self._update_scalebar_drag(label_x, label_y)
         self._scalebar_drag_origin_img = None
 
-    def _start_arrow_drag(self, label_x: int, label_y: int):
-        """Find the nearest measurement arrow under cursor and start dragging it."""
-        self._arrow_drag_index = None
+    def _start_line_drag(self, label_x: int, label_y: int):
+        """Find the nearest measurement line under cursor and start dragging it."""
+        self._line_drag_index = None
         if not self.overlay_renderer.measurements:
             self.measurement_status_label.setText("No measurements available to move.")
             return
@@ -1297,30 +1596,30 @@ class TEMImageEditor(QMainWindow):
                 best_idx = idx
 
         if best_idx is None:
-            self.measurement_status_label.setText("No arrow found nearby. Click closer to a measurement line.")
+            self.measurement_status_label.setText("No line found nearby. Click closer to a measurement line.")
             return
 
-        self._arrow_drag_index = best_idx
-        self._arrow_drag_origin_img = (float(mapped[0]), float(mapped[1]))
+        self._line_drag_index = best_idx
+        self._line_drag_origin_img = (float(mapped[0]), float(mapped[1]))
         m = self.overlay_renderer.measurements[best_idx]
-        self._arrow_drag_start_start = (float(m["start"][0]), float(m["start"][1]))
-        self._arrow_drag_start_end = (float(m["end"][0]), float(m["end"][1]))
+        self._line_drag_start_start = (float(m["start"][0]), float(m["start"][1]))
+        self._line_drag_start_end = (float(m["end"][0]), float(m["end"][1]))
 
-    def _update_arrow_drag(self, label_x: int, label_y: int):
-        """Update selected arrow position while preserving its shape and label offset."""
-        if self._arrow_drag_index is None or self._arrow_drag_origin_img is None:
+    def _update_line_drag(self, label_x: int, label_y: int):
+        """Update selected line position while preserving its shape and label offset."""
+        if self._line_drag_index is None or self._line_drag_origin_img is None:
             return
         mapped = self._map_label_to_image_coords(label_x, label_y)
         if mapped is None or self._last_rendered_image_size is None:
             return
 
-        ddx = float(mapped[0]) - float(self._arrow_drag_origin_img[0])
-        ddy = float(mapped[1]) - float(self._arrow_drag_origin_img[1])
+        ddx = float(mapped[0]) - float(self._line_drag_origin_img[0])
+        ddy = float(mapped[1]) - float(self._line_drag_origin_img[1])
 
-        x1 = self._arrow_drag_start_start[0] + ddx
-        y1 = self._arrow_drag_start_start[1] + ddy
-        x2 = self._arrow_drag_start_end[0] + ddx
-        y2 = self._arrow_drag_start_end[1] + ddy
+        x1 = self._line_drag_start_start[0] + ddx
+        y1 = self._line_drag_start_start[1] + ddy
+        x2 = self._line_drag_start_end[0] + ddx
+        y2 = self._line_drag_start_end[1] + ddy
 
         img_w, img_h = self._last_rendered_image_size
         min_x = min(x1, x2)
@@ -1343,16 +1642,16 @@ class TEMImageEditor(QMainWindow):
         x2 += shift_x
         y2 += shift_y
 
-        self.overlay_renderer.measurements[self._arrow_drag_index]["start"] = (int(round(x1)), int(round(y1)))
-        self.overlay_renderer.measurements[self._arrow_drag_index]["end"] = (int(round(x2)), int(round(y2)))
+        self.overlay_renderer.measurements[self._line_drag_index]["start"] = (int(round(x1)), int(round(y1)))
+        self.overlay_renderer.measurements[self._line_drag_index]["end"] = (int(round(x2)), int(round(y2)))
         self._refresh_measurements_list()
         self.update_display()
 
-    def _finish_arrow_drag(self, label_x: int, label_y: int):
-        """Commit final measurement arrow position."""
-        self._update_arrow_drag(label_x, label_y)
-        self._arrow_drag_index = None
-        self._arrow_drag_origin_img = None
+    def _finish_line_drag(self, label_x: int, label_y: int):
+        """Commit final measurement line position."""
+        self._update_line_drag(label_x, label_y)
+        self._line_drag_index = None
+        self._line_drag_origin_img = None
 
     def _start_label_drag(self, label_x: int, label_y: int):
         """Find the nearest label under the cursor and start dragging it."""
@@ -1438,34 +1737,90 @@ class TEMImageEditor(QMainWindow):
 
     def remove_selected_measurement(self):
         """Remove the selected measurement from the list."""
-        row = self.measurement_list.currentRow()
-        if 0 <= row < len(self.overlay_renderer.measurements):
-            self.overlay_renderer.measurements.pop(row)
-            self._refresh_measurements_list()
-            self.update_display()
+        rows = self._get_selected_measurement_rows()
+        if not rows:
+            return
+        for row in sorted(rows, reverse=True):
+            if 0 <= row < len(self.overlay_renderer.measurements):
+                self.overlay_renderer.measurements.pop(row)
+        self._refresh_measurements_list()
+        if self.overlay_renderer.measurements:
+            self.measurement_table.selectRow(min(rows[0], len(self.overlay_renderer.measurements) - 1))
+        else:
+            self._on_measurement_selection_changed(-1)
+        self.update_display()
 
     def clear_all_measurements(self):
         """Clear all measurement annotations."""
         self.overlay_renderer.measurements.clear()
         self.overlay_renderer.measurement_preview = None
         self._draw_preview_start = None
-        self.measurement_list.clear()
+        self.measurement_table.setRowCount(0)
+        self._on_measurement_selection_changed(-1)
         self.measurement_status_label.setText("All measurements cleared.")
         self.update_display()
 
     def _refresh_measurements_list(self):
-        """Repopulate the sidebar list with current measurements and lengths."""
-        if not hasattr(self, 'measurement_list'):
+        """Repopulate the sidebar table with current measurements and properties."""
+        if not hasattr(self, 'measurement_table'):
             return
-        self.measurement_list.clear()
+        self.measurement_table.setRowCount(0)
         unit = self.overlay_renderer.measurement_unit
         for i, m in enumerate(self.overlay_renderer.measurements):
+            if "start_cap" not in m:
+                m["start_cap"] = "head"
+            if "end_cap" not in m:
+                m["end_cap"] = "head"
+            if m["start_cap"] in {"arrow", "block"}:
+                m["start_cap"] = "head"
+            if m["end_cap"] in {"arrow", "block"}:
+                m["end_cap"] = "head"
+            if "show_label" not in m:
+                m["show_label"] = bool(self.overlay_renderer.measurement_show_label)
+            if "line_color" not in m:
+                m["line_color"] = QColor(self.overlay_renderer.measurement_line_color)
+            if "text_color" not in m:
+                m["text_color"] = QColor(self.overlay_renderer.measurement_text_color)
+            if "line_width" not in m:
+                m["line_width"] = int(self.overlay_renderer.measurement_line_width)
             dx = float(m["end"][0] - m["start"][0])
             dy = float(m["end"][1] - m["start"][1])
             length_nm = float(np.hypot(dx, dy)) * float(self.nm_per_pixel)
             value = length_nm / 1000.0 if unit == "µm" else length_nm
-            val_text = str(int(round(value)))
-            self.measurement_list.addItem(f"  {i + 1}:  {val_text} {unit}")
+            length_text = f"{value:.1f} {unit}"
+            line_color = QColor(m["line_color"])
+            text_color = QColor(m["text_color"])
+
+            row = self.measurement_table.rowCount()
+            self.measurement_table.insertRow(row)
+            values = [
+                str(i + 1),
+                length_text,
+                "Yes" if bool(m.get("show_label", True)) else "No",
+                "",
+                "",
+                str(int(m.get("line_width", self.overlay_renderer.measurement_line_width))),
+                str(m.get("start_cap", "head")),
+                str(m.get("end_cap", "head")),
+            ]
+            for col, val in enumerate(values):
+                item = QTableWidgetItem(val)
+                if col in (3, 4):
+                    swatch_color = line_color if col == 3 else text_color
+                    item.setBackground(QBrush(swatch_color))
+                    item.setToolTip(f"Click to change color ({swatch_color.name().upper()})")
+                self.measurement_table.setItem(row, col, item)
+
+        self.measurement_table.resizeColumnsToContents()
+
+    def _has_any_visible_measurement_labels(self) -> bool:
+        """Return True if at least one measurement currently has a visible label."""
+        if not self.overlay_renderer.measurements:
+            return False
+        for m in self.overlay_renderer.measurements:
+            if bool(m.get("show_label", self.overlay_renderer.measurement_show_label)):
+                return True
+        return False
 
     def _map_label_to_image_coords(self, label_x: int, label_y: int) -> Optional[tuple[int, int]]:
         """Map click coordinates from QLabel space to source image pixel coordinates."""
@@ -1757,12 +2112,14 @@ class BatchAnnotationDialog(QDialog):
         self.bar_color_btn = QPushButton("Choose...")
         self.bar_color = QColor(self.renderer.bar_color)
         self.bar_color_btn.clicked.connect(self._choose_bar_color)
+        set_color_button_indicator(self.bar_color_btn, self.bar_color)
         color_layout.addWidget(self.bar_color_btn)
         
         color_layout.addWidget(QLabel("Text color:"))
         self.text_color_btn = QPushButton("Choose...")
         self.text_color = QColor(self.renderer.text_color)
         self.text_color_btn.clicked.connect(self._choose_text_color)
+        set_color_button_indicator(self.text_color_btn, self.text_color)
         color_layout.addWidget(self.text_color_btn)
         scalebar_layout.addLayout(color_layout)
         
@@ -1776,6 +2133,7 @@ class BatchAnnotationDialog(QDialog):
         self.bg_color_btn = QPushButton("Choose...")
         self.bg_color = QColor(self.renderer.scalebar_bg_color)
         self.bg_color_btn.clicked.connect(self._choose_bg_color)
+        set_color_button_indicator(self.bg_color_btn, self.bg_color)
         bg_layout.addWidget(self.bg_color_btn)
         
         bg_layout.addWidget(QLabel("Opacity:"))
@@ -1809,6 +2167,7 @@ class BatchAnnotationDialog(QDialog):
         self.aperture_color_btn = QPushButton("Choose...")
         self.aperture_color = QColor(self.renderer.aperture_color)
         self.aperture_color_btn.clicked.connect(self._choose_aperture_color)
+        set_color_button_indicator(self.aperture_color_btn, self.aperture_color)
         ap_color_layout.addWidget(self.aperture_color_btn)
         aperture_layout.addLayout(ap_color_layout)
         
@@ -1929,24 +2288,28 @@ class BatchAnnotationDialog(QDialog):
         color = QColorDialog.getColor(self.bar_color, self, "Choose Scalebar Bar Color")
         if color.isValid():
             self.bar_color = color
+            set_color_button_indicator(self.bar_color_btn, self.bar_color)
     
     def _choose_text_color(self):
         """Choose text color."""
         color = QColorDialog.getColor(self.text_color, self, "Choose Scalebar Text Color")
         if color.isValid():
             self.text_color = color
+            set_color_button_indicator(self.text_color_btn, self.text_color)
     
     def _choose_bg_color(self):
         """Choose background color."""
         color = QColorDialog.getColor(self.bg_color, self, "Choose Background Color")
         if color.isValid():
             self.bg_color = color
+            set_color_button_indicator(self.bg_color_btn, self.bg_color)
     
     def _choose_aperture_color(self):
         """Choose aperture color."""
         color = QColorDialog.getColor(self.aperture_color, self, "Choose Aperture Color")
         if color.isValid():
             self.aperture_color = color
+            set_color_button_indicator(self.aperture_color_btn, self.aperture_color)
     
     def _choose_output_folder(self):
         """Choose output folder."""
