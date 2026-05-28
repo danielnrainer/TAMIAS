@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QProgressDialog, QScrollArea
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QPixmap, QImage, QAction, QColor, QFont
+from PyQt6.QtGui import QPixmap, QImage, QAction, QActionGroup, QColor, QFont, QPalette
 from PyQt6.QtWidgets import QColorDialog, QFontDialog
 
 # Helpers
@@ -120,6 +120,18 @@ class TEMImageEditor(QMainWindow):
         # Setup UI
         self.setup_ui()
         self.setup_menu()
+
+        # Theme mode: auto follows the OS color scheme.
+        self._theme_mode = "auto"
+        self._apply_theme_mode(self._theme_mode)
+
+        app = QApplication.instance()
+        if app is not None:
+            try:
+                app.styleHints().colorSchemeChanged.connect(self._on_system_color_scheme_changed)
+            except Exception:
+                # Older Qt builds may not expose this signal; Auto still applies at startup.
+                pass
         
     def setup_menu(self):
         """Setup the menu bar."""
@@ -157,6 +169,84 @@ class TEMImageEditor(QMainWindow):
         manage_presets_action = QAction("Manage Presets...", self)
         manage_presets_action.triggered.connect(self.manage_presets)
         presets_menu.addAction(manage_presets_action)
+
+        # Theme menu
+        theme_menu = menubar.addMenu("Theme")
+        self.theme_action_group = QActionGroup(self)
+        self.theme_action_group.setExclusive(True)
+
+        self.theme_actions = {
+            "auto": QAction("Auto (System)", self),
+            "light": QAction("Light", self),
+            "dark": QAction("Dark", self),
+        }
+        for key, action in self.theme_actions.items():
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked, mode=key: self._on_theme_action_triggered(mode, checked))
+            self.theme_action_group.addAction(action)
+            theme_menu.addAction(action)
+
+        self.theme_actions["auto"].setChecked(True)
+
+    def _on_theme_action_triggered(self, mode: str, checked: bool):
+        if checked:
+            self._apply_theme_mode(mode)
+
+    def _sync_theme_action_checks(self):
+        if not hasattr(self, "theme_actions"):
+            return
+        for mode, action in self.theme_actions.items():
+            action.setChecked(mode == self._theme_mode)
+
+    def _is_system_dark_mode(self) -> bool:
+        app = QApplication.instance()
+        if app is None:
+            return False
+        try:
+            return app.styleHints().colorScheme() == Qt.ColorScheme.Dark
+        except Exception:
+            window_color = app.palette().color(QPalette.ColorRole.Window)
+            return window_color.lightness() < 128
+
+    def _create_dark_palette(self) -> QPalette:
+        pal = QPalette()
+        pal.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+        pal.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+        pal.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+        pal.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.white)
+        pal.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+        pal.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+        pal.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+        pal.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+        pal.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+        pal.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+        pal.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
+        pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(127, 127, 127))
+        pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(127, 127, 127))
+        pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(127, 127, 127))
+        return pal
+
+    def _apply_theme_mode(self, mode: str):
+        app = QApplication.instance()
+        if app is None:
+            return
+
+        resolved_mode = mode
+        if mode == "auto":
+            resolved_mode = "dark" if self._is_system_dark_mode() else "light"
+
+        if resolved_mode == "dark":
+            app.setPalette(self._create_dark_palette())
+        else:
+            app.setPalette(app.style().standardPalette())
+
+        self._theme_mode = mode
+        self._sync_theme_action_checks()
+
+    def _on_system_color_scheme_changed(self, _scheme):
+        if self._theme_mode == "auto":
+            self._apply_theme_mode("auto")
         
     def setup_ui(self):
         """Setup the user interface."""
@@ -170,7 +260,9 @@ class TEMImageEditor(QMainWindow):
         
         self.image_label = ImageDisplayLabel()
         self.image_label.setMinimumSize(800, 600)
-        self.image_label.setStyleSheet("QLabel { background-color: #2b2b2b; border: 2px solid #555; }")
+        self.image_label.setStyleSheet(
+            "QLabel { background-color: #2b2b2b; border: 2px solid #555; color: #e6e6e6; }"
+        )
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setText("No image loaded")
         self.image_label.mouse_pressed.connect(self.on_draw_press)
@@ -180,7 +272,7 @@ class TEMImageEditor(QMainWindow):
         image_layout.addWidget(self.image_label)
         
         self.file_info_label = QLabel("No file loaded")
-        self.file_info_label.setStyleSheet("QLabel { color: #888; padding: 5px; }")
+        self.file_info_label.setStyleSheet("QLabel { color: palette(mid); padding: 5px; }")
         image_layout.addWidget(self.file_info_label)
         
         main_layout.addLayout(image_layout, stretch=3)
@@ -456,7 +548,7 @@ class TEMImageEditor(QMainWindow):
         aperture_layout.addLayout(size_layout)
         
         self.aperture_info_label = QLabel("Apparent diameter: 2.0 µm")
-        self.aperture_info_label.setStyleSheet("QLabel { color: #888; font-size: 10pt; }")
+        self.aperture_info_label.setStyleSheet("QLabel { color: palette(mid); font-size: 10pt; }")
         aperture_layout.addWidget(self.aperture_info_label)
         
         # Color
@@ -553,7 +645,7 @@ class TEMImageEditor(QMainWindow):
         self.measurement_status_label = QLabel(
             "Enable 'Show Annotations', then click 'Draw Measurement' and drag on the image."
         )
-        self.measurement_status_label.setStyleSheet("QLabel { color: #888; font-size: 10pt; }")
+        self.measurement_status_label.setStyleSheet("QLabel { color: palette(mid); font-size: 10pt; }")
         self.measurement_status_label.setWordWrap(True)
         measurement_layout.addWidget(self.measurement_status_label)
 
@@ -1419,7 +1511,7 @@ class BatchAnnotationDialog(QDialog):
         folder_layout = QHBoxLayout()
         folder_layout.addWidget(QLabel("Output folder:"))
         self.output_folder_edit = QLabel("(same as input)")
-        self.output_folder_edit.setStyleSheet("QLabel { border: 1px solid #555; padding: 3px; }")
+        self.output_folder_edit.setStyleSheet("QLabel { border: 1px solid palette(mid); padding: 3px; }")
         folder_layout.addWidget(self.output_folder_edit, stretch=1)
         
         browse_btn = QPushButton("Browse...")
