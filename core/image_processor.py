@@ -295,6 +295,74 @@ class ImageProcessor:
         
         self.original_image = np.flipud(self.original_image)
         self.apply_brightness_contrast()
+
+    def crop_rows(self, top_rows: int, bottom_rows: int) -> Tuple[bool, Optional[str], Optional[Tuple[int, int]]]:
+        """Crop rows from the top and bottom of the loaded image.
+
+        Returns:
+            (success, error_message, (width, height))
+        """
+        if self.original_image is None:
+            return False, "No image loaded.", None
+
+        top_rows = int(top_rows)
+        bottom_rows = int(bottom_rows)
+        if top_rows < 0 or bottom_rows < 0:
+            return False, "Crop values must be non-negative.", None
+
+        height, _width = self.original_image.shape
+        remaining_height = height - top_rows - bottom_rows
+        if remaining_height <= 0:
+            return False, "Crop values remove all rows. Reduce top/bottom crop amounts.", None
+
+        if top_rows == 0 and bottom_rows == 0:
+            width = int(self.original_image.shape[1])
+            return True, None, (width, int(height))
+
+        start = top_rows
+        end = height - bottom_rows
+        self.original_image = self.original_image[start:end, :].copy()
+        if self.raw_image is not None and self.raw_image.shape[0] == height:
+            self.raw_image = self.raw_image[start:end, :].copy()
+        self.apply_brightness_contrast()
+
+        new_height, new_width = self.original_image.shape
+        return True, None, (int(new_width), int(new_height))
+
+    def crop_rectangle(
+        self, left: int, top: int, right: int, bottom: int
+    ) -> Tuple[bool, Optional[str], Optional[Tuple[int, int]]]:
+        """Crop to a rectangular ROI using exclusive right/bottom bounds.
+
+        Args:
+            left: Left column index (inclusive)
+            top: Top row index (inclusive)
+            right: Right column index (exclusive)
+            bottom: Bottom row index (exclusive)
+
+        Returns:
+            (success, error_message, (width, height))
+        """
+        if self.original_image is None:
+            return False, "No image loaded.", None
+
+        height, width = self.original_image.shape
+
+        left = max(0, min(int(left), width))
+        right = max(0, min(int(right), width))
+        top = max(0, min(int(top), height))
+        bottom = max(0, min(int(bottom), height))
+
+        if right <= left or bottom <= top:
+            return False, "Invalid crop rectangle. Select a non-empty region.", None
+
+        self.original_image = self.original_image[top:bottom, left:right].copy()
+        if self.raw_image is not None and self.raw_image.shape == (height, width):
+            self.raw_image = self.raw_image[top:bottom, left:right].copy()
+        self.apply_brightness_contrast()
+
+        new_height, new_width = self.original_image.shape
+        return True, None, (int(new_width), int(new_height))
     
     def get_current_image(self) -> Optional[np.ndarray]:
         """Get the current processed image."""

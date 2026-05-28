@@ -75,6 +75,11 @@ class QCollapsibleBox(QWidget):
             self.toggleButton.setText(f"▼ {self.title}")
         else:
             self.toggleButton.setText(f"▶ {self.title}")
+
+    def setTitle(self, title: str):
+        """Update the section title while preserving expanded/collapsed state."""
+        self.title = title
+        self.toggle(self.toggleButton.isChecked())
         
     def setContentLayout(self, layout):
         layout.setContentsMargins(8, 4, 8, 4)

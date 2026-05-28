@@ -112,9 +112,11 @@ from core.image_processor import ImageProcessor
 from core.overlay_renderer import OverlayRenderer
 from utils.preset_manager import PresetManager, PresetStorage
 from gui.collapsible_box import QCollapsibleBox
+from gui.crop_controller import CropControllerMixin
+from gui.batch_processing_dialog import BatchProcessingDialog
 
 
-class TEMImageEditor(QMainWindow):
+class TEMImageEditor(CropControllerMixin, QMainWindow):
     """Main application window for TEM image editing."""
     
     def __init__(self):
@@ -146,6 +148,7 @@ class TEMImageEditor(QMainWindow):
         self._scalebar_drag_active = False
         self._scalebar_drag_origin_img: Optional[tuple[float, float]] = None
         self._scalebar_drag_offset_start: tuple[float, float] = (0.0, 0.0)
+        self._init_crop_state()
         self._last_rendered_image_size: Optional[tuple[int, int]] = None
         
         # Load presets
@@ -188,7 +191,7 @@ class TEMImageEditor(QMainWindow):
         
         file_menu.addSeparator()
         
-        batch_action = QAction("Batch Annotate...", self)
+        batch_action = QAction("Batch Processing...", self)
         batch_action.setShortcut("Ctrl+B")
         batch_action.triggered.connect(self.batch_annotate)
         file_menu.addAction(batch_action)
@@ -199,6 +202,12 @@ class TEMImageEditor(QMainWindow):
         exit_action.setShortcut("Ctrl+Q")
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+        # Image menu
+        image_menu = menubar.addMenu("Image")
+        crop_rows_action = QAction("Crop Top/Bottom Rows...", self)
+        crop_rows_action.triggered.connect(self.crop_top_bottom_rows)
+        image_menu.addAction(crop_rows_action)
         
         # Presets menu
         presets_menu = menubar.addMenu("Presets")
@@ -332,6 +341,9 @@ class TEMImageEditor(QMainWindow):
         
         # Imaging mode preset
         self._setup_preset_controls(controls_layout)
+
+        # Image cropping controls
+        self._setup_crop_controls(controls_layout)
         
         # Brightness/Contrast controls
         self._setup_brightness_contrast_controls(controls_layout)
@@ -465,7 +477,7 @@ class TEMImageEditor(QMainWindow):
         
         bc_box.setContentLayout(bc_layout)
         parent_layout.addWidget(bc_box)
-        
+
     def _setup_transform_controls(self, parent_layout):
         """Setup image transform controls."""
         transform_box = QCollapsibleBox("Image Transform", expanded=False)
@@ -814,21 +826,32 @@ class TEMImageEditor(QMainWindow):
                 self._update_brightness_sliders()
 
                 # Reset overlays that are image-specific
-                self.scalebar_checkbox.setChecked(False)
-                self.overlay_renderer.scalebar_offset = (0.0, 0.0)
-                if hasattr(self, 'position_combo'):
-                    self.position_combo.blockSignals(True)
-                    self.position_combo.setCurrentText(self.overlay_renderer.scalebar_position)
-                    self.position_combo.blockSignals(False)
-                self.overlay_renderer.measurements.clear()
-                self.overlay_renderer.measurement_preview = None
-                self._draw_preview_start = None
-                if hasattr(self, 'measurement_table'):
-                    self.measurement_table.setRowCount(0)
+                self._reset_image_specific_overlays(disable_scalebar=True)
 
                 self._refresh_scale_information()
             else:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{error}")
+
+    def _reset_image_specific_overlays(self, disable_scalebar: bool):
+        """Reset overlays that depend on source image geometry."""
+        if disable_scalebar:
+            self.scalebar_checkbox.setChecked(False)
+        self.overlay_renderer.scalebar_offset = (0.0, 0.0)
+        if hasattr(self, 'position_combo'):
+            self.position_combo.blockSignals(True)
+            self.position_combo.setCurrentText(self.overlay_renderer.scalebar_position)
+            self.position_combo.blockSignals(False)
+
+        self.overlay_renderer.measurements.clear()
+        self.overlay_renderer.measurement_preview = None
+        self._draw_preview_start = None
+        self._label_drag_index = None
+        self._line_drag_index = None
+        self._scalebar_drag_origin_img = None
+        self.reset_crop_state()
+        if hasattr(self, 'measurement_table'):
+            self.measurement_table.setRowCount(0)
+        self._on_measurement_selection_changed(-1)
     
     def on_preset_changed(self, preset_name: str):
         """Handle preset selection change."""
@@ -1427,6 +1450,12 @@ class TEMImageEditor(QMainWindow):
 
     def _refresh_image_interaction_mode(self):
         """Sync image-label interaction cursor/mode with current active tool."""
+        if self.is_crop_move_active():
+            self.image_label.set_label_drag_mode(True)
+            return
+        if self.is_crop_draw_active():
+            self.image_label.set_draw_mode(True)
+            return
         if self._draw_mode_active:
             self.image_label.set_draw_mode(True)
             return
@@ -1438,6 +1467,8 @@ class TEMImageEditor(QMainWindow):
     def on_draw_press(self, x: int, y: int):
         """Mouse press — either start a new line or grab a label."""
         if not self.image_processor.has_image():
+            return
+        if self.crop_handle_mouse_press(x, y):
             return
         if self._scalebar_drag_active:
             self._start_scalebar_drag(x, y)
@@ -1458,6 +1489,8 @@ class TEMImageEditor(QMainWindow):
 
     def on_draw_move(self, x: int, y: int):
         """Mouse move — update live preview or drag a label."""
+        if self.crop_handle_mouse_move(x, y):
+            return
         if self._scalebar_drag_active:
             self._update_scalebar_drag(x, y)
             return
@@ -1479,6 +1512,8 @@ class TEMImageEditor(QMainWindow):
 
     def on_draw_release(self, x: int, y: int):
         """Mouse release — commit a new line or drop a dragged label."""
+        if self.crop_handle_mouse_release(x, y):
+            return
         if self._scalebar_drag_active:
             self._finish_scalebar_drag(x, y)
             return
@@ -1869,6 +1904,8 @@ class TEMImageEditor(QMainWindow):
         if q_image is None:
             return
 
+        self.draw_manual_crop_overlay(q_image)
+
         self._last_rendered_image_size = (q_image.width(), q_image.height())
         
         pixmap = QPixmap.fromImage(q_image)
@@ -1979,522 +2016,8 @@ class TEMImageEditor(QMainWindow):
     
     def batch_annotate(self):
         """Open batch annotation dialog."""
-        dialog = BatchAnnotationDialog(self.presets, self.overlay_renderer, self)
+        dialog = BatchProcessingDialog(self.presets, self.overlay_renderer, self)
         dialog.exec()
-
-
-class BatchAnnotationDialog(QDialog):
-    """Dialog for batch annotation of multiple images."""
-    
-    def __init__(self, presets: dict, renderer: OverlayRenderer, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Batch Annotate Images")
-        self.setModal(True)
-        self.resize(900, 700)
-        
-        self.presets = presets
-        self.renderer = renderer
-        self.files = []
-        
-        self._setup_ui()
-        
-    def _setup_ui(self):
-        """Setup the batch dialog UI."""
-        layout = QVBoxLayout()
-        
-        # File selection section
-        file_group = QGroupBox("Select Files")
-        file_layout = QVBoxLayout()
-        
-        btn_layout = QHBoxLayout()
-        add_files_btn = QPushButton("Add Files...")
-        add_files_btn.clicked.connect(self._add_files)
-        btn_layout.addWidget(add_files_btn)
-        
-        remove_files_btn = QPushButton("Remove Selected")
-        remove_files_btn.clicked.connect(self._remove_selected)
-        btn_layout.addWidget(remove_files_btn)
-        
-        clear_files_btn = QPushButton("Clear All")
-        clear_files_btn.clicked.connect(self._clear_files)
-        btn_layout.addWidget(clear_files_btn)
-        
-        file_layout.addLayout(btn_layout)
-        
-        self.file_list = QListWidget()
-        file_layout.addWidget(self.file_list)
-        
-        file_group.setLayout(file_layout)
-        layout.addWidget(file_group)
-        
-        # Parameters section
-        params_group = QGroupBox("Annotation Parameters")
-        params_layout = QVBoxLayout()
-        
-        # Preset selection
-        preset_layout = QHBoxLayout()
-        preset_layout.addWidget(QLabel("Preset:"))
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItems(sorted(self.presets.keys()))
-        self.preset_combo.setCurrentText("Standard")
-        self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
-        preset_layout.addWidget(self.preset_combo)
-        params_layout.addLayout(preset_layout)
-        
-        # Pixel size
-        pixel_layout = QHBoxLayout()
-        pixel_layout.addWidget(QLabel("Pixel size:"))
-        self.pixel_size_spinbox = QDoubleSpinBox()
-        self.pixel_size_spinbox.setRange(0.00001, 100000.0)
-        self.pixel_size_spinbox.setDecimals(3)
-        self.pixel_size_spinbox.setValue(35.6)
-        pixel_layout.addWidget(self.pixel_size_spinbox)
-        
-        self.pixel_unit_combo = QComboBox()
-        self.pixel_unit_combo.addItems(["nm", "µm"])
-        pixel_layout.addWidget(self.pixel_unit_combo)
-        params_layout.addLayout(pixel_layout)
-        
-        # Auto brightness/contrast
-        self.auto_bc_checkbox = QCheckBox("Auto-adjust brightness/contrast")
-        self.auto_bc_checkbox.setChecked(True)
-        params_layout.addWidget(self.auto_bc_checkbox)
-        
-        # Scalebar section
-        scalebar_group = QGroupBox("Scalebar")
-        scalebar_layout = QVBoxLayout()
-        
-        self.scalebar_checkbox = QCheckBox("Add scalebar")
-        self.scalebar_checkbox.setChecked(True)
-        scalebar_layout.addWidget(self.scalebar_checkbox)
-        
-        # Scalebar length
-        length_layout = QHBoxLayout()
-        length_layout.addWidget(QLabel("Length:"))
-        self.scalebar_length_spinbox = SmartDoubleSpinBox()
-        self.scalebar_length_spinbox.setDecimals(2)
-        self.scalebar_length_spinbox.setSingleStep(0.1)
-        self.scalebar_length_spinbox.setRange(0.01, 10000.0)
-        self.scalebar_length_spinbox.setValue(5.0)
-        try:
-            self.scalebar_length_spinbox.lineEdit().textEdited.connect(self._on_batch_scalebar_length_text_edited)
-        except Exception:
-            pass
-        length_layout.addWidget(self.scalebar_length_spinbox)
-        
-        self.scalebar_unit_combo = QComboBox()
-        self.scalebar_unit_combo.addItems(["nm", "µm"])
-        self.scalebar_unit_combo.setCurrentText("µm")
-        length_layout.addWidget(self.scalebar_unit_combo)
-        scalebar_layout.addLayout(length_layout)
-        
-        # Scalebar thickness
-        thickness_layout = QHBoxLayout()
-        thickness_layout.addWidget(QLabel("Thickness (px):"))
-        self.scalebar_thickness_spinbox = QSpinBox()
-        self.scalebar_thickness_spinbox.setRange(5, 100)
-        self.scalebar_thickness_spinbox.setValue(self.renderer.scalebar_thickness)
-        thickness_layout.addWidget(self.scalebar_thickness_spinbox)
-        scalebar_layout.addLayout(thickness_layout)
-        
-        # Scalebar position
-        position_layout = QHBoxLayout()
-        position_layout.addWidget(QLabel("Position:"))
-        self.position_combo = QComboBox()
-        self.position_combo.addItems(["bottom-right", "bottom-left", "top-right", "top-left"])
-        self.position_combo.setCurrentText(self.renderer.scalebar_position)
-        position_layout.addWidget(self.position_combo)
-        scalebar_layout.addLayout(position_layout)
-        
-        # Colors
-        color_layout = QHBoxLayout()
-        color_layout.addWidget(QLabel("Bar color:"))
-        self.bar_color_btn = QPushButton("Choose...")
-        self.bar_color = QColor(self.renderer.bar_color)
-        self.bar_color_btn.clicked.connect(self._choose_bar_color)
-        set_color_button_indicator(self.bar_color_btn, self.bar_color)
-        color_layout.addWidget(self.bar_color_btn)
-        
-        color_layout.addWidget(QLabel("Text color:"))
-        self.text_color_btn = QPushButton("Choose...")
-        self.text_color = QColor(self.renderer.text_color)
-        self.text_color_btn.clicked.connect(self._choose_text_color)
-        set_color_button_indicator(self.text_color_btn, self.text_color)
-        color_layout.addWidget(self.text_color_btn)
-        scalebar_layout.addLayout(color_layout)
-        
-        # Background box
-        self.bg_checkbox = QCheckBox("Background box")
-        self.bg_checkbox.setChecked(self.renderer.scalebar_bg_enabled)
-        scalebar_layout.addWidget(self.bg_checkbox)
-        
-        bg_layout = QHBoxLayout()
-        bg_layout.addWidget(QLabel("BG color:"))
-        self.bg_color_btn = QPushButton("Choose...")
-        self.bg_color = QColor(self.renderer.scalebar_bg_color)
-        self.bg_color_btn.clicked.connect(self._choose_bg_color)
-        set_color_button_indicator(self.bg_color_btn, self.bg_color)
-        bg_layout.addWidget(self.bg_color_btn)
-        
-        bg_layout.addWidget(QLabel("Opacity:"))
-        self.bg_opacity_spinbox = QSpinBox()
-        self.bg_opacity_spinbox.setRange(0, 255)
-        self.bg_opacity_spinbox.setValue(self.renderer.scalebar_bg_opacity)
-        bg_layout.addWidget(self.bg_opacity_spinbox)
-        scalebar_layout.addLayout(bg_layout)
-        
-        scalebar_group.setLayout(scalebar_layout)
-        params_layout.addWidget(scalebar_group)
-        
-        # Aperture section
-        aperture_group = QGroupBox("Aperture Overlay")
-        aperture_layout = QVBoxLayout()
-        
-        self.aperture_checkbox = QCheckBox("Add aperture overlay")
-        self.aperture_checkbox.setChecked(False)
-        aperture_layout.addWidget(self.aperture_checkbox)
-        
-        ap_layout = QHBoxLayout()
-        ap_layout.addWidget(QLabel("Nominal diameter (µm):"))
-        self.aperture_size_combo = QComboBox()
-        self.aperture_size_combo.addItems(["300", "200", "100", "50"])
-        self.aperture_size_combo.setCurrentText("100")
-        ap_layout.addWidget(self.aperture_size_combo)
-        aperture_layout.addLayout(ap_layout)
-        
-        ap_color_layout = QHBoxLayout()
-        ap_color_layout.addWidget(QLabel("Circle color:"))
-        self.aperture_color_btn = QPushButton("Choose...")
-        self.aperture_color = QColor(self.renderer.aperture_color)
-        self.aperture_color_btn.clicked.connect(self._choose_aperture_color)
-        set_color_button_indicator(self.aperture_color_btn, self.aperture_color)
-        ap_color_layout.addWidget(self.aperture_color_btn)
-        aperture_layout.addLayout(ap_color_layout)
-        
-        aperture_group.setLayout(aperture_layout)
-        params_layout.addWidget(aperture_group)
-        
-        params_group.setLayout(params_layout)
-        layout.addWidget(params_group)
-        
-        # Output section
-        output_group = QGroupBox("Output")
-        output_layout = QVBoxLayout()
-        
-        folder_layout = QHBoxLayout()
-        folder_layout.addWidget(QLabel("Output folder:"))
-        self.output_folder_edit = QLabel("(same as input)")
-        self.output_folder_edit.setStyleSheet("QLabel { border: 1px solid palette(mid); padding: 3px; }")
-        folder_layout.addWidget(self.output_folder_edit, stretch=1)
-        
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self._choose_output_folder)
-        folder_layout.addWidget(browse_btn)
-        output_layout.addLayout(folder_layout)
-        
-        suffix_layout = QHBoxLayout()
-        suffix_layout.addWidget(QLabel("Filename suffix:"))
-        self.suffix_edit = QComboBox()
-        self.suffix_edit.setEditable(True)
-        self.suffix_edit.addItems(["_processed", "_annotated", "_scaled", ""])
-        self.suffix_edit.setCurrentText("_processed")
-        suffix_layout.addWidget(self.suffix_edit)
-        output_layout.addLayout(suffix_layout)
-        
-        format_layout = QHBoxLayout()
-        format_layout.addWidget(QLabel("Output format:"))
-        self.format_combo = QComboBox()
-        self.format_combo.addItems(["PNG", "TIFF", "JPEG"])
-        self.format_combo.setCurrentText("PNG")
-        format_layout.addWidget(self.format_combo)
-        output_layout.addLayout(format_layout)
-        
-        output_group.setLayout(output_layout)
-        layout.addWidget(output_group)
-        
-        # Buttons
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        
-        process_btn = QPushButton("Process All")
-        process_btn.setMinimumHeight(40)
-        process_btn.clicked.connect(self._process_all)
-        button_layout.addWidget(process_btn)
-        
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setMinimumHeight(40)
-        cancel_btn.clicked.connect(self.reject)
-        button_layout.addWidget(cancel_btn)
-        
-        layout.addLayout(button_layout)
-        
-        self.setLayout(layout)
-        
-        # Initialize preset
-        self._on_preset_changed("Standard")
-    
-    def _add_files(self):
-        """Add files to the batch list."""
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "Select Images", "",
-            "Image Files (*.rodhypix *.tif *.tiff *.png *.jpg *.jpeg *.bmp);;RODHyPix Files (*.rodhypix);;TIFF Files (*.tif *.tiff);;All Files (*.*)"
-        )
-        if files:
-            for file in files:
-                if file not in self.files:
-                    self.files.append(file)
-                    self.file_list.addItem(Path(file).name)
-    
-    def _remove_selected(self):
-        """Remove selected files from the list."""
-        selected = self.file_list.selectedItems()
-        if not selected:
-            return
-        for item in selected:
-            row = self.file_list.row(item)
-            self.file_list.takeItem(row)
-            self.files.pop(row)
-    
-    def _clear_files(self):
-        """Clear all files from the list."""
-        self.files.clear()
-        self.file_list.clear()
-    
-    def _on_preset_changed(self, preset_name: str):
-        """Handle preset selection change."""
-        if preset_name in self.presets:
-            try:
-                npp = float(self.presets[preset_name])
-                if npp <= 0:
-                    npp = 1.0
-            except Exception:
-                npp = 1.0
-            
-            self.pixel_size_spinbox.setValue(npp)
-            self.pixel_unit_combo.setCurrentText("nm")
-            
-            # Set preset-specific scalebar defaults
-            if preset_name == "Standard":
-                self.scalebar_unit_combo.setCurrentText("µm")
-                self.scalebar_length_spinbox.setValue(5.0)
-                self._batch_scalebar_length_text_raw = "5"
-            elif preset_name == "High Res":
-                self.scalebar_unit_combo.setCurrentText("nm")
-                self.scalebar_length_spinbox.setValue(500.0)
-                self._batch_scalebar_length_text_raw = "500"
-    
-    def _choose_bar_color(self):
-        """Choose bar color."""
-        color = QColorDialog.getColor(self.bar_color, self, "Choose Scalebar Bar Color")
-        if color.isValid():
-            self.bar_color = color
-            set_color_button_indicator(self.bar_color_btn, self.bar_color)
-    
-    def _choose_text_color(self):
-        """Choose text color."""
-        color = QColorDialog.getColor(self.text_color, self, "Choose Scalebar Text Color")
-        if color.isValid():
-            self.text_color = color
-            set_color_button_indicator(self.text_color_btn, self.text_color)
-    
-    def _choose_bg_color(self):
-        """Choose background color."""
-        color = QColorDialog.getColor(self.bg_color, self, "Choose Background Color")
-        if color.isValid():
-            self.bg_color = color
-            set_color_button_indicator(self.bg_color_btn, self.bg_color)
-    
-    def _choose_aperture_color(self):
-        """Choose aperture color."""
-        color = QColorDialog.getColor(self.aperture_color, self, "Choose Aperture Color")
-        if color.isValid():
-            self.aperture_color = color
-            set_color_button_indicator(self.aperture_color_btn, self.aperture_color)
-    
-    def _choose_output_folder(self):
-        """Choose output folder."""
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
-        if folder:
-            self.output_folder_edit.setText(folder)
-
-    def _on_batch_scalebar_length_text_edited(self, text: str):
-        """Capture raw text for batch scalebar length to preserve trailing zeros in label."""
-        self._batch_scalebar_length_text_raw = text
-    
-    def _process_all(self):
-        """Process all files in the batch."""
-        if not self.files:
-            QMessageBox.warning(self, "No Files", "Please add files to process.")
-            return
-        
-        # Get output folder
-        output_folder_text = self.output_folder_edit.text()
-        if output_folder_text == "(same as input)":
-            output_folder = None
-        else:
-            output_folder = Path(output_folder_text)
-            if not output_folder.exists():
-                QMessageBox.warning(self, "Invalid Folder", "Output folder does not exist.")
-                return
-        
-        # Get parameters
-        pixel_size = self.pixel_size_spinbox.value()
-        pixel_unit = self.pixel_unit_combo.currentText()
-        nm_per_pixel = pixel_size * 1000.0 if pixel_unit == "µm" else pixel_size
-        if nm_per_pixel <= 0:
-            nm_per_pixel = 1.0
-        
-        auto_bc = self.auto_bc_checkbox.isChecked()
-        
-        # Scalebar settings
-        scalebar_enabled = self.scalebar_checkbox.isChecked()
-        scalebar_length = self.scalebar_length_spinbox.value()
-        scalebar_unit = self.scalebar_unit_combo.currentText()
-        scalebar_thickness = self.scalebar_thickness_spinbox.value()
-        scalebar_position = self.position_combo.currentText()
-        
-        # Aperture settings
-        aperture_enabled = self.aperture_checkbox.isChecked()
-        aperture_size = int(self.aperture_size_combo.currentText())
-        
-        # Output settings
-        suffix = self.suffix_edit.currentText()
-        output_format = self.format_combo.currentText().lower()
-        
-        # Create progress dialog
-        progress = QProgressDialog("Processing images...", "Cancel", 0, len(self.files), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        
-        # Process each file
-        processor = ImageProcessor()
-        renderer = OverlayRenderer()
-        
-        # Configure renderer
-        renderer.scalebar_enabled = scalebar_enabled
-        renderer.scalebar_length_value = float(scalebar_length)
-        renderer.scalebar_unit = scalebar_unit
-        renderer.scalebar_thickness = scalebar_thickness
-        renderer.scalebar_position = scalebar_position
-        renderer.bar_color = QColor(self.bar_color)
-        renderer.text_color = QColor(self.text_color)
-        renderer.scalebar_bg_enabled = self.bg_checkbox.isChecked()
-        renderer.scalebar_bg_color = QColor(self.bg_color)
-        renderer.scalebar_bg_opacity = self.bg_opacity_spinbox.value()
-        renderer.aperture_enabled = aperture_enabled
-        renderer.aperture_nominal_size = aperture_size
-        renderer.aperture_color = QColor(self.aperture_color)
-        # Preserve label decimals in batch if provided
-        override = getattr(self, '_batch_scalebar_length_text_raw', None)
-        if isinstance(override, str) and override.strip() != "":
-            try:
-                float(override)
-                renderer.scalebar_label_override = override.strip()
-            except ValueError:
-                renderer.scalebar_label_override = None
-        
-        successful = 0
-        failed = []
-        
-        for i, file_path in enumerate(self.files):
-            if progress.wasCanceled():
-                break
-            
-            progress.setValue(i)
-            progress.setLabelText(f"Processing {Path(file_path).name}...")
-            QApplication.processEvents()
-            
-            try:
-                # Load image
-                success, error, _, pixel_metadata = processor.load_image(file_path)
-                if not success:
-                    failed.append((file_path, error))
-                    continue
-                
-                # Use pixel metadata from rodhypix file if available, otherwise use provided value
-                file_nm_per_pixel = nm_per_pixel
-                if pixel_metadata and 'pixel_size_nm' in pixel_metadata:
-                    # Use pixel size from file header
-                    if pixel_unit == "µm":
-                        file_nm_per_pixel = pixel_metadata['pixel_size_um']
-                    else:
-                        file_nm_per_pixel = pixel_metadata['pixel_size_nm']
-                    print(f"Using pixel size from {Path(file_path).name}: {file_nm_per_pixel:.3f} {pixel_unit}")
-                
-                # Auto adjust if requested
-                if auto_bc:
-                    processor.auto_adjust_contrast()
-                
-                # Render with overlays
-                q_image = renderer.render_image_with_overlays(
-                    processor.get_current_image(),
-                    file_nm_per_pixel
-                )
-                
-                if q_image is None:
-                    failed.append((file_path, "Failed to render image"))
-                    continue
-                
-                # Determine output path
-                input_path = Path(file_path)
-                if output_folder:
-                    output_dir = output_folder
-                else:
-                    output_dir = input_path.parent
-                
-                output_name = input_path.stem + suffix + "." + output_format
-                output_path = output_dir / output_name
-                
-                # Convert and export
-                q_rgba = q_image.convertToFormat(QImage.Format.Format_RGBA8888)
-                width = q_rgba.width()
-                height = q_rgba.height()
-                ptr = q_rgba.bits()
-                ptr.setsize(height * width * 4)
-                arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
-                export_rgba = arr.copy()
-                
-                # Get DPI
-                input_dpi = processor.get_dpi()
-                if input_dpi and all(v > 0 for v in input_dpi):
-                    xdpi = min(input_dpi[0], 300.0)
-                    ydpi = min(input_dpi[1], 300.0)
-                else:
-                    xdpi = ydpi = 300.0
-                
-                # Save
-                if output_format in ["jpg", "jpeg", "bmp"]:
-                    export_rgb = export_rgba[:, :, :3]
-                    pil_image = Image.fromarray(export_rgb, mode='RGB')
-                    pil_image.save(str(output_path), dpi=(xdpi, ydpi))
-                else:
-                    pil_image = Image.fromarray(export_rgba, mode='RGBA')
-                    pil_image.save(str(output_path), dpi=(xdpi, ydpi))
-                
-                successful += 1
-                
-            except Exception as e:
-                failed.append((file_path, str(e)))
-        
-        progress.setValue(len(self.files))
-        
-        # Show summary
-        if failed:
-            failed_list = "\n".join([f"{Path(f).name}: {e}" for f, e in failed[:10]])
-            if len(failed) > 10:
-                failed_list += f"\n... and {len(failed) - 10} more"
-            QMessageBox.warning(
-                self, "Batch Processing Complete",
-                f"Successfully processed: {successful}/{len(self.files)}\n\n"
-                f"Failed files:\n{failed_list}"
-            )
-        else:
-            QMessageBox.information(
-                self, "Batch Processing Complete",
-                f"Successfully processed all {successful} images!"
-            )
-        
-        self.accept()
 
 
 def main():

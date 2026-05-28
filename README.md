@@ -1,11 +1,12 @@
 # SynergyED Image Annotate
 
-A PyQt6 desktop application for processing (mainly) Synergy-ED images with calibrated overlays, particle measurement tools, and batch annotation support.
+A PyQt6 desktop application for processing (mainly) Synergy-ED images with calibrated overlays, crop controls, particle measurement tools, and batch processing support.
 
 ## Features
 
 - **Image Processing**: Load TIF/TIFF/RODHyPix images with automatic brightness/contrast adjustment
 - **RODHyPix Support**: Native support for `.rodhypix` detector image files with automatic pixel size extraction
+- **Cropping Tools**: Batch top/bottom row crop plus interactive manual crop with square/aspect controls and drag/move support
 - **Smart Scalebars**: Calibrated scalebars with customizable appearance (length, thickness, position, colors, font, background box)
 - **Aperture Overlay**: Visualize SAED aperture sizes on images
 - **Particle Measurement**: Draw and annotate dimensions directly on the image with per-measurement style control
@@ -19,7 +20,7 @@ A PyQt6 desktop application for processing (mainly) Synergy-ED images with calib
 - **Clickable Color Swatches**: Color swatches are shown in measurement rows and beside color-picker buttons for quick visual feedback
 - **Theme Support**: Light, dark, and auto (system) theme modes
 - **Resizable Workspace**: Adjustable splitter between image pane and control pane
-- **Batch Processing**: Process multiple images with consistent settings
+- **Batch Processing**: Dedicated dialog with scrollable collapsible sections, applied/not-applied status markers, and crop/overlay/export settings
 - **Imaging Presets**: Store and manage pixel size calibrations for different imaging modes
 - **Compact UI**: Laptop-friendly interface with collapsible sections and scrollable controls
 - **Multiple Export Formats**: PNG, TIFF, JPEG
@@ -54,7 +55,7 @@ pip install -r requirements.txt
 ```bash
 pip install numba
 ```
-   This provides ~10x speedup when loading `.rodhypix` files. The application works without it using pure Python decompression.
+  This provides ~10x speedup when loading `.rodhypix` files. The application works without it using pure Python decompression.
 
 ### Usage
 
@@ -67,28 +68,34 @@ python SynergyED-img_annotate.py
 1. Load an image (Ctrl+O)
 2. Select imaging mode preset or enter pixel size manually
 3. Adjust brightness/contrast (Auto Adjust recommended)
-4. Configure scalebar settings (length, position, colors)
-5. Optionally add particle measurements:
+4. Optionally crop away top/bottom rows or use the manual crop tool for a custom selection
+5. Configure scalebar settings (length, position, colors)
+6. Add overlay of selected-area aperture (calibrated sizes)
+7. Optionally add particle measurements:
   - Enable **Particle Measurement**
   - Click **✏ Draw Measurement** and drag
   - Use **↔ Move Line** to reposition a line
   - Use **☰ Move Label** to reposition labels
   - Select one or more rows in the measurement table to edit selected styles together
-6. Export image (Ctrl+S)
+8. Export image (Ctrl+S)
 
 **Batch Processing:**
-- File → Batch Annotate (Ctrl+B)
-- Add images, configure settings, and process all at once
+- File → Batch Processing (Ctrl+B)
+- Add images, configure crop/overlay/export settings, and process all at once
 
 ## Project Structure
 
 ```
 SynergyED-img_annotate/
 ├── core/                       # Core processing modules
+│   ├── crop_geometry.py       # Crop geometry helpers
 │   ├── image_processor.py     # Image loading and adjustments
 │   └── overlay_renderer.py    # Scalebar, aperture and measurement rendering
 ├── gui/                       # GUI components
-│   └── collapsible_box.py    # Collapsible section widget
+│   ├── batch_processing_dialog.py # Batch processing dialog
+│   ├── collapsible_box.py     # Collapsible section widget
+│   ├── crop_controller.py     # Crop interaction/controller mixin
+│   └── crop_dialog.py         # Top/bottom crop dialog
 ├── utils/                     # Utility modules
 │   └── preset_manager.py     # Preset storage and management
 ├── SynergyED-img_annotate.py # Main application entry point
@@ -102,17 +109,18 @@ SynergyED-img_annotate/
 - PyQt6 >= 6.5, < 7
 - NumPy >= 1.24, < 3
 - Pillow >= 10, < 13
-- PyInstaller >= 6.0 (for building executables)
+- PyInstaller >= 6.0, < 7 (for building executables)
 
 ### Optional Dependencies
 
-- **numba** >= 0.60.0 (recommended for `.rodhypix` files)
+- **numba** >= 0.60, < 1 (recommended for `.rodhypix` files)
   - Provides ~10x speedup for RODHyPix decompression
   - Install with: `pip install numba`
 
 ## Technical Details
 
 - **Image Processing**: 8-bit grayscale (16-bit images auto-normalized)
+- **Cropping**: Top/bottom row crop and interactive manual crop are available before overlay rendering
 - **Scalebar Calculation**: Accounts for nm/pixel calibration
 - **RODHyPix Support**: 
   - Native reader adapted from [cap-auto](https://github.com/robertbuecker/cap-auto) (BSD 3-Clause)
@@ -120,8 +128,8 @@ SynergyED-img_annotate/
   - Supports TY6 compressed format
   - Optimized with Numba JIT compilation when available
   - Pure Python fallback for compatibility
-- **Architecture**: Modular design with separate core, GUI, and utility modules
-- **UI**: Collapsible sections for efficient screen space management
+- **Architecture**: Modular design with separate core, GUI, and utility modules, with crop and batch workflows split into dedicated modules
+- **UI**: Collapsible sections and scrollable batch controls for efficient screen space management
 - **Particle Measurement**: Click-and-drag lines with auto-computed length labels; per-measurement line/text styles, cap styles, width, and label visibility; label positions stored as per-measurement image-pixel offsets and fully repositionable via drag
 
 ## Acknowledgments
