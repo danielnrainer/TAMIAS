@@ -112,10 +112,20 @@ class TEMImageEditor(QMainWindow):
         self._label_drag_index: Optional[int] = None        # which measurement
         self._label_drag_origin_img: Optional[tuple[float, float]] = None  # img coords at press
         self._label_drag_offset_start: tuple[float, float] = (0.0, 0.0)   # offset at drag start
+        self._arrow_drag_active = False
+        self._arrow_drag_index: Optional[int] = None
+        self._arrow_drag_origin_img: Optional[tuple[float, float]] = None
+        self._arrow_drag_start_start: tuple[float, float] = (0.0, 0.0)
+        self._arrow_drag_start_end: tuple[float, float] = (0.0, 0.0)
+        self._scalebar_drag_active = False
+        self._scalebar_drag_origin_img: Optional[tuple[float, float]] = None
+        self._scalebar_drag_offset_start: tuple[float, float] = (0.0, 0.0)
         self._last_rendered_image_size: Optional[tuple[int, int]] = None
         
         # Load presets
         self.presets = PresetStorage.load_presets()
+        if "Custom" not in self.presets:
+            self.presets["Custom"] = 1.0
         
         # Setup UI
         self.setup_ui()
@@ -352,19 +362,29 @@ class TEMImageEditor(QMainWindow):
         pixel_size_layout.addWidget(self.pixel_size_unit_combo)
         
         preset_layout.addLayout(pixel_size_layout)
+
+        preset_info_label = QLabel(
+            "To change the pixel size of presets, go to Presets > Manage Presets in the main menu."
+        )
+        preset_info_label.setWordWrap(True)
+        # preset_info_label.setStyleSheet("QLabel { color: palette(mid); font-size: 10pt; }")
+        preset_info_label.setStyleSheet("QLabel { font-style: italic; }")
+        preset_layout.addWidget(preset_info_label)
         
         # Set default preset
         if "Standard" in self.presets:
             self.preset_combo.setCurrentText("Standard")
             # Apply preset-specific scalebar defaults for Standard
             QTimer.singleShot(0, self._apply_initial_scalebar_defaults)
+
+        self._update_pixel_size_editable_state(self.preset_combo.currentText())
         
         preset_box.setContentLayout(preset_layout)
         parent_layout.addWidget(preset_box)
         
     def _setup_brightness_contrast_controls(self, parent_layout):
         """Setup brightness/contrast controls."""
-        bc_box = QCollapsibleBox("Brightness/Contrast", expanded=True)
+        bc_box = QCollapsibleBox("Brightness/Contrast", expanded=False)
         bc_layout = QVBoxLayout()
         
         auto_btn = QPushButton("Auto Adjust")
@@ -420,13 +440,21 @@ class TEMImageEditor(QMainWindow):
         
     def _setup_scalebar_controls(self, parent_layout):
         """Setup scalebar controls."""
-        scalebar_box = QCollapsibleBox("Scalebar", expanded=True)
+        scalebar_box = QCollapsibleBox("Scalebar", expanded=False)
         scalebar_layout = QVBoxLayout()
         
         self.scalebar_checkbox = QCheckBox("Show Scalebar")
         self.scalebar_checkbox.setChecked(True)
         self.scalebar_checkbox.stateChanged.connect(self.on_scalebar_toggled)
         scalebar_layout.addWidget(self.scalebar_checkbox)
+
+        self.move_scalebar_btn = QPushButton("☰  Move Scalebar Box")
+        self.move_scalebar_btn.setCheckable(True)
+        self.move_scalebar_btn.setToolTip(
+            "Click and drag on the image to reposition the full scalebar box"
+        )
+        self.move_scalebar_btn.toggled.connect(self.on_scalebar_drag_mode_toggled)
+        scalebar_layout.addWidget(self.move_scalebar_btn)
         
         # Length
         length_layout = QHBoxLayout()
@@ -463,17 +491,13 @@ class TEMImageEditor(QMainWindow):
         # Position
         scalebar_layout.addWidget(QLabel("Position:"))
         self.position_combo = QComboBox()
-        self.position_combo.addItems(["bottom-right", "bottom-left", "top-right", "top-left"])
+        self.position_combo.addItems(["bottom-right", "bottom-left", "top-right", "top-left", "custom"])
         self.position_combo.currentTextChanged.connect(self.on_scalebar_changed)
         scalebar_layout.addWidget(self.position_combo)
         
         # Bar color
         bar_color_layout = QHBoxLayout()
         bar_color_layout.addWidget(QLabel("Bar Color:"))
-        self.bar_color_combo = QComboBox()
-        self.bar_color_combo.addItems(["white", "black"])
-        self.bar_color_combo.currentTextChanged.connect(self.on_bar_color_preset_changed)
-        bar_color_layout.addWidget(self.bar_color_combo)
         self.bar_color_btn = QPushButton("Choose Color…")
         self.bar_color_btn.clicked.connect(self.choose_bar_color)
         bar_color_layout.addWidget(self.bar_color_btn)
@@ -482,10 +506,6 @@ class TEMImageEditor(QMainWindow):
         # Text color
         text_color_layout = QHBoxLayout()
         text_color_layout.addWidget(QLabel("Text Color:"))
-        self.text_color_combo = QComboBox()
-        self.text_color_combo.addItems(["white", "black"])
-        self.text_color_combo.currentTextChanged.connect(self.on_text_color_preset_changed)
-        text_color_layout.addWidget(self.text_color_combo)
         self.text_color_btn = QPushButton("Choose Color…")
         self.text_color_btn.clicked.connect(self.choose_text_color)
         text_color_layout.addWidget(self.text_color_btn)
@@ -594,6 +614,14 @@ class TEMImageEditor(QMainWindow):
         self.move_label_btn.toggled.connect(self.on_label_drag_mode_toggled)
         measurement_layout.addWidget(self.move_label_btn)
 
+        self.move_arrow_btn = QPushButton("↔  Move Arrow")
+        self.move_arrow_btn.setCheckable(True)
+        self.move_arrow_btn.setToolTip(
+            "Click and drag a measurement arrow to move the full annotation"
+        )
+        self.move_arrow_btn.toggled.connect(self.on_arrow_drag_mode_toggled)
+        measurement_layout.addWidget(self.move_arrow_btn)
+
         # Style controls
         unit_layout = QHBoxLayout()
         unit_layout.addWidget(QLabel("Length Unit:"))
@@ -649,6 +677,11 @@ class TEMImageEditor(QMainWindow):
         self.measurement_status_label.setWordWrap(True)
         measurement_layout.addWidget(self.measurement_status_label)
 
+        # Start disabled until measurement overlay is enabled.
+        self.draw_measurement_btn.setEnabled(False)
+        self.move_arrow_btn.setEnabled(False)
+        self.move_label_btn.setEnabled(False)
+
         measurement_box.setContentLayout(measurement_layout)
         parent_layout.addWidget(measurement_box)
         
@@ -696,6 +729,11 @@ class TEMImageEditor(QMainWindow):
 
                 # Reset overlays that are image-specific
                 self.scalebar_checkbox.setChecked(False)
+                self.overlay_renderer.scalebar_offset = (0.0, 0.0)
+                if hasattr(self, 'position_combo'):
+                    self.position_combo.blockSignals(True)
+                    self.position_combo.setCurrentText(self.overlay_renderer.scalebar_position)
+                    self.position_combo.blockSignals(False)
                 self.overlay_renderer.measurements.clear()
                 self.overlay_renderer.measurement_preview = None
                 self._draw_preview_start = None
@@ -708,6 +746,7 @@ class TEMImageEditor(QMainWindow):
     
     def on_preset_changed(self, preset_name: str):
         """Handle preset selection change."""
+        self._update_pixel_size_editable_state(preset_name)
         if preset_name in self.presets:
             try:
                 npp = float(self.presets[preset_name])
@@ -749,6 +788,8 @@ class TEMImageEditor(QMainWindow):
     
     def on_pixel_size_changed(self, value: float):
         """Handle manual pixel size change."""
+        if self.preset_combo.currentText() != "Custom":
+            return
         npp = value * 1000.0 if self.pixel_size_unit == "µm" else value
         if npp <= 0:
             npp = 1.0
@@ -823,7 +864,11 @@ class TEMImageEditor(QMainWindow):
     
     def on_scalebar_toggled(self, state):
         """Handle scalebar checkbox toggle."""
-        self.overlay_renderer.scalebar_enabled = (state == Qt.CheckState.Checked.value)
+        enabled = (state == Qt.CheckState.Checked.value)
+        self.overlay_renderer.scalebar_enabled = enabled
+        self.move_scalebar_btn.setEnabled(enabled)
+        if not enabled and self.move_scalebar_btn.isChecked():
+            self.move_scalebar_btn.setChecked(False)
         self.update_display()
     
     def on_scalebar_changed(self):
@@ -831,7 +876,11 @@ class TEMImageEditor(QMainWindow):
         # numeric value for pixel conversion
         self.overlay_renderer.scalebar_length_value = float(self.scalebar_length_spinbox.value())
         self.overlay_renderer.scalebar_thickness = self.scalebar_thickness_spinbox.value()
-        self.overlay_renderer.scalebar_position = self.position_combo.currentText()
+        selected_position = self.position_combo.currentText()
+        # Preset anchors are absolute to the full image; "custom" keeps current dragged offset.
+        if selected_position != "custom":
+            self.overlay_renderer.scalebar_position = selected_position
+            self.overlay_renderer.scalebar_offset = (0.0, 0.0)
         # Preserve label decimals as typed, if available and valid
         override = getattr(self, 'scalebar_length_text_raw', None)
         if isinstance(override, str) and override.strip() != "":
@@ -856,22 +905,12 @@ class TEMImageEditor(QMainWindow):
         self.scalebar_length_text_raw = text
         self.on_scalebar_changed()
     
-    def on_bar_color_preset_changed(self, name: str):
-        """Handle bar color preset change."""
-        self.overlay_renderer.bar_color = QColor(255, 255, 255) if name == "white" else QColor(0, 0, 0)
-        self.update_display()
-    
     def choose_bar_color(self):
         """Choose custom bar color."""
         color = QColorDialog.getColor(self.overlay_renderer.bar_color, self, "Choose Scalebar Bar Color")
         if color.isValid():
             self.overlay_renderer.bar_color = color
             self.update_display()
-    
-    def on_text_color_preset_changed(self, name: str):
-        """Handle text color preset change."""
-        self.overlay_renderer.text_color = QColor(255, 255, 255) if name == "white" else QColor(0, 0, 0)
-        self.update_display()
     
     def choose_text_color(self):
         """Choose custom text color."""
@@ -943,7 +982,18 @@ class TEMImageEditor(QMainWindow):
 
     def on_measurement_toggled(self, state):
         """Enable or disable particle measurement overlay."""
-        self.overlay_renderer.measurement_enabled = (state == Qt.CheckState.Checked.value)
+        enabled = (state == Qt.CheckState.Checked.value)
+        self.overlay_renderer.measurement_enabled = enabled
+        self.draw_measurement_btn.setEnabled(enabled)
+        self.move_arrow_btn.setEnabled(enabled)
+        self.move_label_btn.setEnabled(enabled and self.overlay_renderer.measurement_show_label)
+        if not enabled:
+            if self.draw_measurement_btn.isChecked():
+                self.draw_measurement_btn.setChecked(False)
+            if self.move_arrow_btn.isChecked():
+                self.move_arrow_btn.setChecked(False)
+            if self.move_label_btn.isChecked():
+                self.move_label_btn.setChecked(False)
         self.update_display()
 
     def on_measurement_changed(self):
@@ -984,13 +1034,23 @@ class TEMImageEditor(QMainWindow):
     def on_draw_mode_toggled(self, checked: bool):
         """Toggle drag-draw mode on the image label."""
         self._draw_mode_active = checked
-        self.image_label.set_draw_mode(checked)
+        self._refresh_image_interaction_mode()
         if checked:
-            # Untoggle move-label mode
+            # Untoggle all move modes
             self.move_label_btn.blockSignals(True)
             self.move_label_btn.setChecked(False)
             self.move_label_btn.blockSignals(False)
             self._label_drag_active = False
+            self.move_arrow_btn.blockSignals(True)
+            self.move_arrow_btn.setChecked(False)
+            self.move_arrow_btn.blockSignals(False)
+            self._arrow_drag_active = False
+            self.move_scalebar_btn.blockSignals(True)
+            self.move_scalebar_btn.setChecked(False)
+            self.move_scalebar_btn.blockSignals(False)
+            self._scalebar_drag_active = False
+            self._arrow_drag_index = None
+            self._scalebar_drag_origin_img = None
             # Ensure the annotation overlay is active when drawing starts
             if not self.measurement_checkbox.isChecked():
                 self.measurement_checkbox.setChecked(True)
@@ -1006,23 +1066,97 @@ class TEMImageEditor(QMainWindow):
     def on_label_drag_mode_toggled(self, checked: bool):
         """Toggle label-drag (move label) mode."""
         self._label_drag_active = checked
-        self.image_label.set_label_drag_mode(checked)
+        self._refresh_image_interaction_mode()
         if checked:
             # Untoggle draw mode
             self.draw_measurement_btn.blockSignals(True)
             self.draw_measurement_btn.setChecked(False)
             self.draw_measurement_btn.blockSignals(False)
             self._draw_mode_active = False
+            self.move_arrow_btn.blockSignals(True)
+            self.move_arrow_btn.setChecked(False)
+            self.move_arrow_btn.blockSignals(False)
+            self._arrow_drag_active = False
+            self.move_scalebar_btn.blockSignals(True)
+            self.move_scalebar_btn.setChecked(False)
+            self.move_scalebar_btn.blockSignals(False)
+            self._scalebar_drag_active = False
             self.measurement_status_label.setText(
                 "Move Label mode ON — click and drag any label to reposition it."
             )
         else:
             self._label_drag_index = None
+            self._label_drag_origin_img = None
             self.measurement_status_label.setText("Move Label mode off.")
+
+    def on_arrow_drag_mode_toggled(self, checked: bool):
+        """Toggle arrow-drag mode (move full measurement arrows)."""
+        self._arrow_drag_active = checked
+        self._refresh_image_interaction_mode()
+        if checked:
+            self.draw_measurement_btn.blockSignals(True)
+            self.draw_measurement_btn.setChecked(False)
+            self.draw_measurement_btn.blockSignals(False)
+            self._draw_mode_active = False
+            self.move_label_btn.blockSignals(True)
+            self.move_label_btn.setChecked(False)
+            self.move_label_btn.blockSignals(False)
+            self._label_drag_active = False
+            self.move_scalebar_btn.blockSignals(True)
+            self.move_scalebar_btn.setChecked(False)
+            self.move_scalebar_btn.blockSignals(False)
+            self._scalebar_drag_active = False
+            self.measurement_status_label.setText(
+                "Move Arrow mode ON — click and drag a measurement arrow to reposition it."
+            )
+        else:
+            self._arrow_drag_index = None
+            self._arrow_drag_origin_img = None
+            self.measurement_status_label.setText("Move Arrow mode off.")
+
+    def on_scalebar_drag_mode_toggled(self, checked: bool):
+        """Toggle drag mode for moving the full scalebar box."""
+        self._scalebar_drag_active = checked
+        self._refresh_image_interaction_mode()
+        if checked:
+            self.draw_measurement_btn.blockSignals(True)
+            self.draw_measurement_btn.setChecked(False)
+            self.draw_measurement_btn.blockSignals(False)
+            self._draw_mode_active = False
+            self.move_label_btn.blockSignals(True)
+            self.move_label_btn.setChecked(False)
+            self.move_label_btn.blockSignals(False)
+            self._label_drag_active = False
+            self.move_arrow_btn.blockSignals(True)
+            self.move_arrow_btn.setChecked(False)
+            self.move_arrow_btn.blockSignals(False)
+            self._arrow_drag_active = False
+            self.measurement_status_label.setText(
+                "Move Scalebar mode ON — drag the scalebar box to reposition it."
+            )
+        else:
+            self._scalebar_drag_origin_img = None
+            self.measurement_status_label.setText("Move Scalebar mode off.")
+
+    def _refresh_image_interaction_mode(self):
+        """Sync image-label interaction cursor/mode with current active tool."""
+        if self._draw_mode_active:
+            self.image_label.set_draw_mode(True)
+            return
+        if self._label_drag_active or self._arrow_drag_active or self._scalebar_drag_active:
+            self.image_label.set_label_drag_mode(True)
+            return
+        self.image_label.set_draw_mode(False)
 
     def on_draw_press(self, x: int, y: int):
         """Mouse press — either start a new line or grab a label."""
         if not self.image_processor.has_image():
+            return
+        if self._scalebar_drag_active:
+            self._start_scalebar_drag(x, y)
+            return
+        if self._arrow_drag_active:
+            self._start_arrow_drag(x, y)
             return
         if self._label_drag_active:
             self._start_label_drag(x, y)
@@ -1037,6 +1171,12 @@ class TEMImageEditor(QMainWindow):
 
     def on_draw_move(self, x: int, y: int):
         """Mouse move — update live preview or drag a label."""
+        if self._scalebar_drag_active:
+            self._update_scalebar_drag(x, y)
+            return
+        if self._arrow_drag_active:
+            self._update_arrow_drag(x, y)
+            return
         if self._label_drag_active:
             self._update_label_drag(x, y)
             return
@@ -1052,6 +1192,12 @@ class TEMImageEditor(QMainWindow):
 
     def on_draw_release(self, x: int, y: int):
         """Mouse release — commit a new line or drop a dragged label."""
+        if self._scalebar_drag_active:
+            self._finish_scalebar_drag(x, y)
+            return
+        if self._arrow_drag_active:
+            self._finish_arrow_drag(x, y)
+            return
         if self._label_drag_active:
             self._finish_label_drag(x, y)
             return
@@ -1071,15 +1217,149 @@ class TEMImageEditor(QMainWindow):
 
     # --- Label-drag helpers ---
 
+    def _start_scalebar_drag(self, label_x: int, label_y: int):
+        """Start dragging the full scalebar box when the click hits its current bounds."""
+        self._scalebar_drag_origin_img = None
+        if not self.overlay_renderer.scalebar_enabled or self._last_rendered_image_size is None:
+            return
+
+        mapped = self._map_label_to_image_coords(label_x, label_y)
+        if mapped is None:
+            return
+        img_x, img_y = float(mapped[0]), float(mapped[1])
+
+        img_w, img_h = self._last_rendered_image_size
+        rect = self.overlay_renderer.get_scalebar_box_rect(img_w, img_h, self.nm_per_pixel)
+        if rect is None:
+            return
+
+        hit_pad = 8.0
+        left, top, right, bottom = rect
+        if not (left - hit_pad <= img_x <= right + hit_pad and top - hit_pad <= img_y <= bottom + hit_pad):
+            self.measurement_status_label.setText("Click on the scalebar box to move it.")
+            return
+
+        self._scalebar_drag_origin_img = (img_x, img_y)
+        self._scalebar_drag_offset_start = tuple(self.overlay_renderer.scalebar_offset)
+        # Mark dropdown as custom when the user starts manual repositioning.
+        if self.position_combo.currentText() != "custom":
+            self.position_combo.blockSignals(True)
+            self.position_combo.setCurrentText("custom")
+            self.position_combo.blockSignals(False)
+
+    def _update_scalebar_drag(self, label_x: int, label_y: int):
+        """Update scalebar offset while dragging."""
+        if self._scalebar_drag_origin_img is None:
+            return
+        mapped = self._map_label_to_image_coords(label_x, label_y)
+        if mapped is None:
+            return
+        ddx = float(mapped[0]) - float(self._scalebar_drag_origin_img[0])
+        ddy = float(mapped[1]) - float(self._scalebar_drag_origin_img[1])
+        self.overlay_renderer.scalebar_offset = (
+            float(self._scalebar_drag_offset_start[0]) + ddx,
+            float(self._scalebar_drag_offset_start[1]) + ddy,
+        )
+        self.update_display()
+
+    def _finish_scalebar_drag(self, label_x: int, label_y: int):
+        """Commit final scalebar box position."""
+        self._update_scalebar_drag(label_x, label_y)
+        self._scalebar_drag_origin_img = None
+
+    def _start_arrow_drag(self, label_x: int, label_y: int):
+        """Find the nearest measurement arrow under cursor and start dragging it."""
+        self._arrow_drag_index = None
+        if not self.overlay_renderer.measurements:
+            self.measurement_status_label.setText("No measurements available to move.")
+            return
+
+        mapped = self._map_label_to_image_coords(label_x, label_y)
+        if mapped is None:
+            return
+
+        img_w, img_h, scale, offset_x, offset_y = self._get_display_mapping()
+        if scale <= 0:
+            return
+
+        best_idx = None
+        best_dist = 18.0
+        px = float(label_x)
+        py = float(label_y)
+        for idx, m in enumerate(self.overlay_renderer.measurements):
+            sx1 = float(m["start"][0]) * scale + offset_x
+            sy1 = float(m["start"][1]) * scale + offset_y
+            sx2 = float(m["end"][0]) * scale + offset_x
+            sy2 = float(m["end"][1]) * scale + offset_y
+            dist = self._point_to_segment_distance(px, py, sx1, sy1, sx2, sy2)
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+
+        if best_idx is None:
+            self.measurement_status_label.setText("No arrow found nearby. Click closer to a measurement line.")
+            return
+
+        self._arrow_drag_index = best_idx
+        self._arrow_drag_origin_img = (float(mapped[0]), float(mapped[1]))
+        m = self.overlay_renderer.measurements[best_idx]
+        self._arrow_drag_start_start = (float(m["start"][0]), float(m["start"][1]))
+        self._arrow_drag_start_end = (float(m["end"][0]), float(m["end"][1]))
+
+    def _update_arrow_drag(self, label_x: int, label_y: int):
+        """Update selected arrow position while preserving its shape and label offset."""
+        if self._arrow_drag_index is None or self._arrow_drag_origin_img is None:
+            return
+        mapped = self._map_label_to_image_coords(label_x, label_y)
+        if mapped is None or self._last_rendered_image_size is None:
+            return
+
+        ddx = float(mapped[0]) - float(self._arrow_drag_origin_img[0])
+        ddy = float(mapped[1]) - float(self._arrow_drag_origin_img[1])
+
+        x1 = self._arrow_drag_start_start[0] + ddx
+        y1 = self._arrow_drag_start_start[1] + ddy
+        x2 = self._arrow_drag_start_end[0] + ddx
+        y2 = self._arrow_drag_start_end[1] + ddy
+
+        img_w, img_h = self._last_rendered_image_size
+        min_x = min(x1, x2)
+        max_x = max(x1, x2)
+        min_y = min(y1, y2)
+        max_y = max(y1, y2)
+        shift_x = 0.0
+        shift_y = 0.0
+        if min_x < 0:
+            shift_x = -min_x
+        elif max_x > (img_w - 1):
+            shift_x = (img_w - 1) - max_x
+        if min_y < 0:
+            shift_y = -min_y
+        elif max_y > (img_h - 1):
+            shift_y = (img_h - 1) - max_y
+
+        x1 += shift_x
+        y1 += shift_y
+        x2 += shift_x
+        y2 += shift_y
+
+        self.overlay_renderer.measurements[self._arrow_drag_index]["start"] = (int(round(x1)), int(round(y1)))
+        self.overlay_renderer.measurements[self._arrow_drag_index]["end"] = (int(round(x2)), int(round(y2)))
+        self._refresh_measurements_list()
+        self.update_display()
+
+    def _finish_arrow_drag(self, label_x: int, label_y: int):
+        """Commit final measurement arrow position."""
+        self._update_arrow_drag(label_x, label_y)
+        self._arrow_drag_index = None
+        self._arrow_drag_origin_img = None
+
     def _start_label_drag(self, label_x: int, label_y: int):
         """Find the nearest label under the cursor and start dragging it."""
         self._label_drag_index = None
         if not self.image_processor.has_image() or self._last_rendered_image_size is None:
             return
-        img_w, img_h = self._last_rendered_image_size
-        display_w = max(1, self.image_label.width())
-        display_h = max(1, self.image_label.height())
-        scale = min(display_w / img_w, display_h / img_h)
+        _img_w, _img_h, scale, offset_x, offset_y = self._get_display_mapping()
 
         centres = self.overlay_renderer.get_label_centres()
         hit_radius_screen = 40.0   # pixels in screen space
@@ -1089,8 +1369,6 @@ class TEMImageEditor(QMainWindow):
             if c is None:
                 continue
             # convert image coords -> screen coords
-            offset_x = (display_w - img_w * scale) / 2.0
-            offset_y = (display_h - img_h * scale) / 2.0
             sx = c[0] * scale + offset_x
             sy = c[1] * scale + offset_y
             dist = np.hypot(label_x - sx, label_y - sy)
@@ -1131,6 +1409,32 @@ class TEMImageEditor(QMainWindow):
         self._update_label_drag(label_x, label_y)
         self._label_drag_index = None
         self._label_drag_origin_img = None
+
+    @staticmethod
+    def _point_to_segment_distance(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+        """Return shortest distance from point P to segment AB in screen space."""
+        vx = x2 - x1
+        vy = y2 - y1
+        wx = px - x1
+        wy = py - y1
+        vv = vx * vx + vy * vy
+        if vv <= 1e-12:
+            return float(np.hypot(px - x1, py - y1))
+        t = (wx * vx + wy * vy) / vv
+        t = max(0.0, min(1.0, t))
+        proj_x = x1 + t * vx
+        proj_y = y1 + t * vy
+        return float(np.hypot(px - proj_x, py - proj_y))
+
+    def _get_display_mapping(self) -> tuple[int, int, float, float, float]:
+        """Return image/display mapping as (img_w, img_h, scale, offset_x, offset_y)."""
+        img_w, img_h = self._last_rendered_image_size if self._last_rendered_image_size else (1, 1)
+        display_w = max(1, self.image_label.width())
+        display_h = max(1, self.image_label.height())
+        scale = min(display_w / img_w, display_h / img_h)
+        offset_x = (display_w - img_w * scale) / 2.0
+        offset_y = (display_h - img_h * scale) / 2.0
+        return img_w, img_h, scale, offset_x, offset_y
 
     def remove_selected_measurement(self):
         """Remove the selected measurement from the list."""
@@ -1286,11 +1590,21 @@ class TEMImageEditor(QMainWindow):
     
     def _update_preset_combo(self):
         """Update preset combo box."""
+        if "Custom" not in self.presets:
+            self.presets["Custom"] = 1.0
         current = self.preset_combo.currentText() if self.preset_combo.count() > 0 else None
         self.preset_combo.clear()
         self.preset_combo.addItems(sorted(self.presets.keys()))
         if current and current in self.presets:
             self.preset_combo.setCurrentText(current)
+        if hasattr(self, "pixel_size_spinbox") and hasattr(self, "pixel_size_unit_combo"):
+            self._update_pixel_size_editable_state(self.preset_combo.currentText())
+
+    def _update_pixel_size_editable_state(self, preset_name: str):
+        """Allow editing pixel-size fields only for the Custom preset."""
+        editable = (preset_name == "Custom")
+        self.pixel_size_spinbox.setEnabled(editable)
+        self.pixel_size_unit_combo.setEnabled(editable)
     
     def _apply_initial_scalebar_defaults(self):
         """Apply initial scalebar defaults for the default preset."""

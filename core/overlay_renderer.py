@@ -26,6 +26,7 @@ class OverlayRenderer:
         self.scalebar_bg_enabled = True
         self.scalebar_bg_color = QColor(0, 0, 0)
         self.scalebar_bg_opacity = 255
+        self.scalebar_offset: tuple[float, float] = (0.0, 0.0)  # image-pixel offset from anchor preset
         # Optional label override (numeric text only, without unit). If set, we'll display it verbatim.
         self.scalebar_label_override: Optional[str] = None
         
@@ -98,6 +99,80 @@ class OverlayRenderer:
     
     def _draw_scalebar(self, qimg: QImage, width: int, height: int, nm_per_pixel: float):
         """Draw scalebar on the image."""
+        layout = self._compute_scalebar_layout(width, height, nm_per_pixel)
+        if layout is None:
+            return
+
+        x = layout["bar_x"]
+        y = layout["bar_y"]
+        scalebar_length_px = layout["bar_length_px"]
+        text_x = layout["text_x"]
+        text_baseline_y = layout["text_baseline_y"]
+        label = layout["label"]
+        rect_left = layout["box_left"]
+        rect_top = layout["box_top"]
+        rect_right = layout["box_right"]
+        rect_bottom = layout["box_bottom"]
+
+        # Determine colors
+        bar_qcolor = QColor(self.bar_color)
+        text_qcolor = QColor(self.text_color)
+
+        # Compute outline color for text contrast
+        r, g, b, *_ = text_qcolor.getRgb()
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+        outline_qcolor = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
+
+        # Start painting
+        painter = QPainter(qimg)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+
+        # Font setup
+        try:
+            if isinstance(self.scalebar_font, QFont):
+                painter.setFont(self.scalebar_font)
+            else:
+                painter.setFont(QFont("Arial", 20))
+        except Exception:
+            painter.setFont(QFont("Arial", 20))
+
+        # Optional background box
+        if self.scalebar_bg_enabled:
+            bg = QColor(self.scalebar_bg_color)
+            bg.setAlpha(self.scalebar_bg_opacity)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(bg))
+            painter.drawRect(
+                int(rect_left),
+                int(rect_top),
+                max(1, int(rect_right - rect_left)),
+                max(1, int(rect_bottom - rect_top)),
+            )
+
+        # Draw scalebar rectangle
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(bar_qcolor))
+        painter.drawRect(x, y, scalebar_length_px, self.scalebar_thickness)
+
+        # Draw text with outline
+        pen = QPen(outline_qcolor)
+        pen.setWidth(3)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawText(text_x, text_baseline_y, label)
+
+        # Foreground text
+        painter.setPen(QPen(text_qcolor))
+        painter.drawText(text_x, text_baseline_y, label)
+
+        painter.end()
+
+    def _compute_scalebar_layout(self, width: int, height: int, nm_per_pixel: float) -> Optional[dict]:
+        """Compute scalebar geometry (bar, text, and union box) in image pixel coordinates."""
+        if nm_per_pixel is None or nm_per_pixel <= 0 or width <= 0 or height <= 0:
+            return None
+
         # Compute scalebar length in pixels
         if self.scalebar_unit == "µm":
             length_nm = self.scalebar_length_value * 1000.0
@@ -110,15 +185,6 @@ class OverlayRenderer:
         margin = 30
         max_px = max(1, width - 2 * margin)
         scalebar_length_px = min(desired_px, max_px)
-        
-        # Determine colors
-        bar_qcolor = QColor(self.bar_color)
-        text_qcolor = QColor(self.text_color)
-        
-        # Compute outline color for text contrast
-        r, g, b, *_ = text_qcolor.getRgb()
-        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
-        outline_qcolor = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
         
         # Determine position
         if "bottom" in self.scalebar_position:
@@ -147,13 +213,10 @@ class OverlayRenderer:
                 label_value_text = f"{value:.2f}".rstrip('0').rstrip('.')
         unit_text = "µm" if self.scalebar_unit == "µm" else "nm"
         label = f"{label_value_text} {unit_text}"
-        
-        # Start painting
-        painter = QPainter(qimg)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        
-        # Font setup
+
+        # Measure text using current scalebar font
+        tmp_img = QImage(1, 1, QImage.Format.Format_ARGB32)
+        painter = QPainter(tmp_img)
         try:
             if isinstance(self.scalebar_font, QFont):
                 painter.setFont(self.scalebar_font)
@@ -161,63 +224,92 @@ class OverlayRenderer:
                 painter.setFont(QFont("Arial", 20))
         except Exception:
             painter.setFont(QFont("Arial", 20))
-        
         fm = painter.fontMetrics()
         text_width = fm.horizontalAdvance(label)
-        text_height = fm.height()
         ascent = fm.ascent()
         descent = fm.descent()
-        
+        painter.end()
+
         # Text position
+        text_bar_gap = 12  # gap between bar and text
         if "bottom" in self.scalebar_position:
-            text_baseline_y = y - 12  # 12px gap
+            text_baseline_y = y - text_bar_gap
             text_top = text_baseline_y - ascent
             text_bottom = text_baseline_y + descent
         else:
-            text_baseline_y = y + self.scalebar_thickness + ascent + 12
-            text_top = y + self.scalebar_thickness + 12
+            text_baseline_y = y + self.scalebar_thickness + ascent + text_bar_gap
+            text_top = y + self.scalebar_thickness + text_bar_gap
             text_bottom = text_baseline_y + descent
         
         # Center label horizontally over the bar
         text_x = x + (scalebar_length_px - text_width) // 2
         text_x = max(0, min(text_x, width - text_width))
-        
-        # Optional background box
-        if self.scalebar_bg_enabled:
-            pad = 6
-            rect_left = min(x, text_x) - pad
-            rect_right = max(x + scalebar_length_px, text_x + text_width) + pad
-            rect_top = min(y, text_top)
-            rect_bottom = max(y + self.scalebar_thickness, text_bottom) + pad
-            rect_left = max(0, rect_left)
-            rect_top = max(0, rect_top)
-            rect_right = min(width - 1, rect_right)
-            rect_bottom = min(height - 1, rect_bottom)
-            
-            bg = QColor(self.scalebar_bg_color)
-            bg.setAlpha(self.scalebar_bg_opacity)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QBrush(bg))
-            painter.drawRect(int(rect_left), int(rect_top), 
-                           int(rect_right - rect_left), int(rect_bottom - rect_top))
-        
-        # Draw scalebar rectangle
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(bar_qcolor))
-        painter.drawRect(x, y, scalebar_length_px, self.scalebar_thickness)
-        
-        # Draw text with outline
-        pen = QPen(outline_qcolor)
-        pen.setWidth(3)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawText(text_x, text_baseline_y, label)
-        
-        # Foreground text
-        painter.setPen(QPen(text_qcolor))
-        painter.drawText(text_x, text_baseline_y, label)
-        
-        painter.end()
+
+        # Union box around bar + label (used for optional background and drag hitbox)
+        pad = text_bar_gap / 2
+        rect_left = min(x, text_x) - pad
+        rect_right = max(x + scalebar_length_px, text_x + text_width) + pad
+        rect_top = min(y, text_top)
+        rect_bottom = max(y + self.scalebar_thickness, text_bottom) + pad
+
+        # Apply user drag offset and keep the whole box inside the image bounds.
+        offset_x = float(self.scalebar_offset[0])
+        offset_y = float(self.scalebar_offset[1])
+
+        x = int(round(x + offset_x))
+        y = int(round(y + offset_y))
+        text_x = int(round(text_x + offset_x))
+        text_baseline_y = int(round(text_baseline_y + offset_y))
+        rect_left = float(rect_left + offset_x)
+        rect_right = float(rect_right + offset_x)
+        rect_top = float(rect_top + offset_y)
+        rect_bottom = float(rect_bottom + offset_y)
+
+        shift_x = 0.0
+        shift_y = 0.0
+        if rect_left < 0:
+            shift_x = -rect_left
+        elif rect_right > (width - 1):
+            shift_x = (width - 1) - rect_right
+
+        if rect_top < 0:
+            shift_y = -rect_top
+        elif rect_bottom > (height - 1):
+            shift_y = (height - 1) - rect_bottom
+
+        x = int(round(x + shift_x))
+        y = int(round(y + shift_y))
+        text_x = int(round(text_x + shift_x))
+        text_baseline_y = int(round(text_baseline_y + shift_y))
+        rect_left += shift_x
+        rect_right += shift_x
+        rect_top += shift_y
+        rect_bottom += shift_y
+
+        return {
+            "bar_x": x,
+            "bar_y": y,
+            "bar_length_px": int(scalebar_length_px),
+            "text_x": int(text_x),
+            "text_baseline_y": int(text_baseline_y),
+            "label": label,
+            "box_left": float(max(0.0, rect_left)),
+            "box_top": float(max(0.0, rect_top)),
+            "box_right": float(min(float(width - 1), rect_right)),
+            "box_bottom": float(min(float(height - 1), rect_bottom)),
+        }
+
+    def get_scalebar_box_rect(self, width: int, height: int, nm_per_pixel: float) -> Optional[tuple[float, float, float, float]]:
+        """Return (left, top, right, bottom) of the full scalebar box in image coordinates."""
+        layout = self._compute_scalebar_layout(width, height, nm_per_pixel)
+        if layout is None:
+            return None
+        return (
+            float(layout["box_left"]),
+            float(layout["box_top"]),
+            float(layout["box_right"]),
+            float(layout["box_bottom"]),
+        )
     
     def _draw_aperture(self, qimg: QImage, width: int, height: int, nm_per_pixel: float):
         """Draw aperture overlay on the image."""
