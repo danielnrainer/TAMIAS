@@ -12,7 +12,7 @@ License: BSD 3-clause
 
 ---
 
-Adapted for use in SynergyED-img_annotate from the cap-auto repository:
+Adapted for use in TAMIAS from the cap-auto repository:
 https://github.com/robertbuecker/cap-auto
 Copyright (c) 2025, Robert Buecker
 License: BSD 3-clause

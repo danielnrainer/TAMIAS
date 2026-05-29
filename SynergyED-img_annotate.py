@@ -1,5 +1,5 @@
 """
-SynergyED Image Annotating - Main GUI application.
+TAMIAS - Main GUI application.
 A PyQt6 application for processing TEM images with scalebar addition,
 brightness/contrast adjustment, and export capabilities.
 """
@@ -19,8 +19,8 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QAbstractItemView,
     QProgressDialog, QScrollArea, QSplitter, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QModelIndex, QSize
-from PyQt6.QtGui import QPixmap, QImage, QAction, QActionGroup, QColor, QFont, QPalette, QBrush, QIcon
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QModelIndex, QSize, QUrl
+from PyQt6.QtGui import QPixmap, QImage, QAction, QActionGroup, QColor, QFont, QPalette, QBrush, QIcon, QDesktopServices
 from PyQt6.QtWidgets import QColorDialog, QFontDialog
 
 # Helpers
@@ -111,9 +111,20 @@ def set_color_button_indicator(button: QPushButton, color: QColor):
 from core.image_processor import ImageProcessor
 from core.overlay_renderer import OverlayRenderer
 from utils.preset_manager import PresetManager, PresetStorage
+from utils.app_settings_manager import AppSettingsStorage
+from utils.storage_paths import ensure_app_storage_dir
 from gui.collapsible_box import QCollapsibleBox
 from gui.crop_controller import CropControllerMixin
 from gui.batch_processing_dialog import BatchProcessingDialog
+
+
+def get_resource_path(relative_path: str) -> Path:
+    """Resolve paths for both source runs and PyInstaller bundles."""
+    if getattr(sys, "frozen", False):
+        base_path = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    else:
+        base_path = Path(__file__).resolve().parent
+    return base_path / relative_path
 
 
 class TEMImageEditor(CropControllerMixin, QMainWindow):
@@ -121,17 +132,23 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SynergyED Image Annotate")
+        self.setWindowTitle("TAMIAS")
         self.setGeometry(100, 100, 1100, 700)
+
+        self._app_settings = AppSettingsStorage.load_settings()
         
         # Initialize modules
         self.image_processor = ImageProcessor()
         self.overlay_renderer = OverlayRenderer()
+        self._apply_overlay_settings(self._app_settings.get("overlay", {}))
         
         # Current file and calibration
         self.current_file: Optional[str] = None
         self.nm_per_pixel = 1.0
         self.pixel_size_unit = "nm"
+        self.single_io_directory = str(self._app_settings.get("single_io_directory", ""))
+        self.batch_input_directory = str(self._app_settings.get("batch_input_directory", ""))
+        self.batch_output_directory = str(self._app_settings.get("batch_output_directory", ""))
 
         # Measurement interaction state
         self._draw_mode_active = False
@@ -155,13 +172,27 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self.presets = PresetStorage.load_presets()
         if "Custom" not in self.presets:
             self.presets["Custom"] = 1.0
+        crop_defaults = PresetStorage.load_crop_defaults()
+        self._default_crop_top_rows = int(crop_defaults.get("top_rows", 10))
+        self._default_crop_bottom_rows = int(crop_defaults.get("bottom_rows", 9))
         
         # Setup UI
         self.setup_ui()
         self.setup_menu()
 
+        if hasattr(self, "crop_top_spinbox"):
+            self.crop_top_spinbox.setValue(max(0, self._default_crop_top_rows))
+            self.crop_top_spinbox.valueChanged.connect(self._on_crop_defaults_changed)
+        if hasattr(self, "crop_bottom_spinbox"):
+            self.crop_bottom_spinbox.setValue(max(0, self._default_crop_bottom_rows))
+            self.crop_bottom_spinbox.valueChanged.connect(self._on_crop_defaults_changed)
+
+        self._apply_overlay_settings_to_controls()
+        self._restore_window_state_from_settings()
+
         # Theme mode: auto follows the OS color scheme.
-        self._theme_mode = "auto"
+        saved_theme = str(self._app_settings.get("theme_mode", "auto"))
+        self._theme_mode = saved_theme if saved_theme in {"auto", "light", "dark"} else "auto"
         self._apply_theme_mode(self._theme_mode)
 
         app = QApplication.instance()
@@ -209,14 +240,26 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         crop_rows_action.triggered.connect(self.crop_top_bottom_rows)
         image_menu.addAction(crop_rows_action)
         
-        # Presets menu
-        presets_menu = menubar.addMenu("Presets")
+        # Settings menu
+        settings_menu = menubar.addMenu("Settings")
+
         manage_presets_action = QAction("Manage Presets...", self)
         manage_presets_action.triggered.connect(self.manage_presets)
-        presets_menu.addAction(manage_presets_action)
+        settings_menu.addAction(manage_presets_action)
 
-        # Theme menu
-        theme_menu = menubar.addMenu("Theme")
+        import_presets_action = QAction("Load Presets from File...", self)
+        import_presets_action.triggered.connect(self.load_presets_from_file)
+        settings_menu.addAction(import_presets_action)
+
+        export_presets_action = QAction("Save Presets to File...", self)
+        export_presets_action.triggered.connect(self.save_presets_to_file)
+        settings_menu.addAction(export_presets_action)
+
+        settings_menu.addSeparator()
+
+        theme_menu = settings_menu.addMenu("Select Theme")
+        open_settings_folder_action = QAction("Open Settings Folder", self)
+        open_settings_folder_action.triggered.connect(self.open_settings_folder)
         self.theme_action_group = QActionGroup(self)
         self.theme_action_group.setExclusive(True)
 
@@ -233,9 +276,159 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
         self.theme_actions["auto"].setChecked(True)
 
+        settings_menu.addSeparator()
+        settings_menu.addAction(open_settings_folder_action)
+
+        # Help menu
+        help_menu = menubar.addMenu("Help")
+        about_action = QAction("About / Citation", self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
+
     def _on_theme_action_triggered(self, mode: str, checked: bool):
         if checked:
             self._apply_theme_mode(mode)
+
+    def open_settings_folder(self):
+        """Open the persisted settings folder in the OS file browser."""
+        settings_dir = ensure_app_storage_dir()
+        ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(settings_dir)))
+        if not ok:
+            QMessageBox.warning(self, "Settings", f"Could not open settings folder:\n{settings_dir}")
+
+    def load_presets_from_file(self):
+        """Import preset definitions from an external JSON file."""
+        start_dir = self.single_io_directory or str(ensure_app_storage_dir())
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Presets from JSON",
+            start_dir,
+            "JSON Files (*.json);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+
+        try:
+            payload = PresetStorage.import_presets_from_file(Path(file_path))
+        except Exception as e:
+            QMessageBox.critical(self, "Preset Import", f"Failed to import presets:\n{e}")
+            return
+
+        imported_presets = dict(payload.get("pixel_size_presets", {}))
+        if "Custom" not in imported_presets:
+            imported_presets["Custom"] = 1.0
+        self.presets = imported_presets
+        self._update_preset_combo()
+
+        crop_defaults = dict(payload.get("crop_defaults", {}))
+        if hasattr(self, "crop_top_spinbox") and hasattr(self, "crop_bottom_spinbox"):
+            self.crop_top_spinbox.setValue(max(0, int(crop_defaults.get("top_rows", 10))))
+            self.crop_bottom_spinbox.setValue(max(0, int(crop_defaults.get("bottom_rows", 9))))
+
+        self.single_io_directory = str(Path(file_path).parent)
+        QMessageBox.information(
+            self,
+            "Preset Import",
+            f"Imported {len(imported_presets)} presets from:\n{file_path}",
+        )
+
+    def save_presets_to_file(self):
+        """Export current presets and crop defaults to an external JSON file."""
+        start_dir = self.single_io_directory or str(ensure_app_storage_dir())
+        suggested_file = str(Path(start_dir) / "tamias_presets.json")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Presets to JSON",
+            suggested_file,
+            "JSON Files (*.json);;All Files (*.*)",
+        )
+        if not file_path:
+            return
+
+        payload = PresetStorage.load_preset_payload()
+        payload["pixel_size_presets"] = dict(self.presets)
+        if hasattr(self, "crop_top_spinbox") and hasattr(self, "crop_bottom_spinbox"):
+            payload["crop_defaults"] = {
+                "top_rows": max(0, int(self.crop_top_spinbox.value())),
+                "bottom_rows": max(0, int(self.crop_bottom_spinbox.value())),
+            }
+
+        try:
+            PresetStorage.save_preset_payload_to_file(payload, Path(file_path))
+        except Exception as e:
+            QMessageBox.critical(self, "Preset Export", f"Failed to save presets:\n{e}")
+            return
+
+        self.single_io_directory = str(Path(file_path).parent)
+        QMessageBox.information(self, "Preset Export", f"Saved presets to:\n{file_path}")
+
+    def show_about_dialog(self):
+        """Show app information and citation links in a compact custom dialog."""
+        github_url = "https://github.com/danielnrainer/TAMIAS"
+        zenodo_url = "https://doi.org/10.5281/zenodo.20403971"
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("About TAMIAS")
+        dialog.setModal(True)
+        dialog.resize(550, 200)
+
+        root_layout = QHBoxLayout(dialog)
+
+        left_panel = QVBoxLayout()
+        logo_label = QLabel()
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_label.setFixedWidth(120)
+
+        icon = QIcon(str(get_resource_path("tamias.png")))
+        if icon.isNull():
+            icon = QIcon(str(get_resource_path("tamias.ico")))
+
+        logo_pixmap = icon.pixmap(96, 96)
+        if not logo_pixmap.isNull():
+            logo_label.setPixmap(logo_pixmap)
+        else:
+            logo_label.setText("TAMIAS")
+            logo_label.setStyleSheet("QLabel { font-weight: bold; font-size: 16pt; }")
+
+        left_panel.addWidget(logo_label)
+        left_panel.addStretch()
+
+        right_panel = QVBoxLayout()
+
+        title_label = QLabel("<b>TAMIAS</b>")
+        subtitle_label = QLabel("Tool for Annotation and Markup of Images from a Synergy-ED")
+        subtitle_label.setWordWrap(True)
+
+        github_label = QLabel(f"GitHub: <a href='{github_url}'>{github_url}</a>")
+        github_label.setOpenExternalLinks(True)
+        github_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+
+        zenodo_label = QLabel(f"Citation (Zenodo DOI): <a href='{zenodo_url}'>{zenodo_url}</a>")
+        zenodo_label.setOpenExternalLinks(True)
+        zenodo_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+
+        note_label = QLabel("Please cite TAMIAS via the Zenodo DOI when relevant.")
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        close_row.addWidget(close_btn)
+
+        right_panel.addWidget(title_label)
+        right_panel.addWidget(subtitle_label)
+        right_panel.addSpacing(6)
+        right_panel.addWidget(github_label)
+        right_panel.addWidget(zenodo_label)
+        right_panel.addSpacing(8)
+        right_panel.addWidget(note_label)
+        right_panel.addStretch()
+        right_panel.addLayout(close_row)
+
+        root_layout.addLayout(left_panel)
+        root_layout.addLayout(right_panel, 1)
+
+        dialog.exec()
 
     def _sync_theme_action_checks(self):
         if not hasattr(self, "theme_actions"):
@@ -292,6 +485,162 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     def _on_system_color_scheme_changed(self, _scheme):
         if self._theme_mode == "auto":
             self._apply_theme_mode("auto")
+
+    def _apply_overlay_settings(self, settings: dict):
+        """Apply persisted overlay defaults to the renderer before UI setup."""
+        if not isinstance(settings, dict):
+            return
+
+        def _as_bool(key: str, current: bool) -> bool:
+            return bool(settings.get(key, current))
+
+        def _as_int(key: str, current: int, min_value: int, max_value: int) -> int:
+            try:
+                value = int(settings.get(key, current))
+            except Exception:
+                value = current
+            return max(min_value, min(max_value, value))
+
+        def _as_float(key: str, current: float, min_value: float, max_value: float) -> float:
+            try:
+                value = float(settings.get(key, current))
+            except Exception:
+                value = current
+            return max(min_value, min(max_value, value))
+
+        def _as_color(key: str, current: QColor) -> QColor:
+            raw = settings.get(key)
+            color = QColor(raw) if raw is not None else QColor(current)
+            return color if color.isValid() else QColor(current)
+
+        self.overlay_renderer.scalebar_enabled = _as_bool("scalebar_enabled", self.overlay_renderer.scalebar_enabled)
+        self.overlay_renderer.scalebar_length_value = _as_float("scalebar_length_value", self.overlay_renderer.scalebar_length_value, 0.01, 10000.0)
+        unit = str(settings.get("scalebar_unit", self.overlay_renderer.scalebar_unit))
+        self.overlay_renderer.scalebar_unit = unit if unit in {"nm", "µm"} else "nm"
+        self.overlay_renderer.scalebar_thickness = _as_int("scalebar_thickness", self.overlay_renderer.scalebar_thickness, 5, 100)
+        position = str(settings.get("scalebar_position", self.overlay_renderer.scalebar_position))
+        self.overlay_renderer.scalebar_position = position if position in {"bottom-right", "bottom-left", "top-right", "top-left", "custom"} else "bottom-right"
+        self.overlay_renderer.bar_color = _as_color("bar_color", self.overlay_renderer.bar_color)
+        self.overlay_renderer.text_color = _as_color("text_color", self.overlay_renderer.text_color)
+        self.overlay_renderer.scalebar_bg_enabled = _as_bool("scalebar_bg_enabled", self.overlay_renderer.scalebar_bg_enabled)
+        self.overlay_renderer.scalebar_bg_color = _as_color("scalebar_bg_color", self.overlay_renderer.scalebar_bg_color)
+        self.overlay_renderer.scalebar_bg_opacity = _as_int("scalebar_bg_opacity", self.overlay_renderer.scalebar_bg_opacity, 0, 255)
+
+        self.overlay_renderer.aperture_enabled = _as_bool("aperture_enabled", self.overlay_renderer.aperture_enabled)
+        self.overlay_renderer.aperture_nominal_size = _as_int("aperture_nominal_size", self.overlay_renderer.aperture_nominal_size, 1, 10000)
+        self.overlay_renderer.aperture_color = _as_color("aperture_color", self.overlay_renderer.aperture_color)
+
+        self.overlay_renderer.measurement_enabled = _as_bool("measurement_enabled", self.overlay_renderer.measurement_enabled)
+        m_unit = str(settings.get("measurement_unit", self.overlay_renderer.measurement_unit))
+        self.overlay_renderer.measurement_unit = m_unit if m_unit in {"nm", "µm"} else "nm"
+        self.overlay_renderer.measurement_line_color = _as_color("measurement_line_color", self.overlay_renderer.measurement_line_color)
+        self.overlay_renderer.measurement_text_color = _as_color("measurement_text_color", self.overlay_renderer.measurement_text_color)
+        self.overlay_renderer.measurement_show_label = _as_bool("measurement_show_label", self.overlay_renderer.measurement_show_label)
+        self.overlay_renderer.measurement_line_width = _as_int("measurement_line_width", self.overlay_renderer.measurement_line_width, 1, 20)
+
+    def _apply_overlay_settings_to_controls(self):
+        """Sync UI controls from renderer values loaded from persisted settings."""
+        self.scalebar_checkbox.setChecked(self.overlay_renderer.scalebar_enabled)
+        self.scalebar_length_spinbox.setValue(float(self.overlay_renderer.scalebar_length_value))
+        self.unit_combo.setCurrentText(self.overlay_renderer.scalebar_unit)
+        self.scalebar_thickness_spinbox.setValue(int(self.overlay_renderer.scalebar_thickness))
+        self.position_combo.setCurrentText(self.overlay_renderer.scalebar_position)
+        self.bg_checkbox.setChecked(self.overlay_renderer.scalebar_bg_enabled)
+        self.bg_opacity_slider.setValue(int(self.overlay_renderer.scalebar_bg_opacity))
+        set_color_button_indicator(self.bar_color_btn, self.overlay_renderer.bar_color)
+        set_color_button_indicator(self.text_color_btn, self.overlay_renderer.text_color)
+        set_color_button_indicator(self.bg_color_btn, self.overlay_renderer.scalebar_bg_color)
+
+        self.aperture_checkbox.setChecked(self.overlay_renderer.aperture_enabled)
+        self.aperture_size_combo.setCurrentText(str(self.overlay_renderer.aperture_nominal_size))
+        set_color_button_indicator(self.aperture_color_btn, self.overlay_renderer.aperture_color)
+
+        self.measurement_checkbox.setChecked(self.overlay_renderer.measurement_enabled)
+        self.measurement_unit_combo.setCurrentText(self.overlay_renderer.measurement_unit)
+        self.measurement_thickness_spinbox.setValue(int(self.overlay_renderer.measurement_line_width))
+        self.measurement_label_checkbox.setChecked(bool(self.overlay_renderer.measurement_show_label))
+        set_color_button_indicator(self.measurement_line_color_btn, self.overlay_renderer.measurement_line_color)
+        set_color_button_indicator(self.measurement_text_color_btn, self.overlay_renderer.measurement_text_color)
+
+    def _restore_window_state_from_settings(self):
+        """Restore window geometry and splitter layout from persisted settings."""
+        window = self._app_settings.get("window", {})
+        try:
+            width = max(800, int(window.get("width", 1100)))
+            height = max(600, int(window.get("height", 700)))
+            self.resize(width, height)
+            self.move(int(window.get("x", 100)), int(window.get("y", 100)))
+        except Exception:
+            pass
+
+        splitter_sizes = self._app_settings.get("splitter_sizes", [900, 350])
+        if isinstance(splitter_sizes, list) and len(splitter_sizes) >= 2:
+            try:
+                self.main_splitter.setSizes([max(100, int(splitter_sizes[0])), max(100, int(splitter_sizes[1]))])
+            except Exception:
+                pass
+
+    def _on_crop_defaults_changed(self, _value=None):
+        """Persist top/bottom crop defaults to presets payload."""
+        if not hasattr(self, "crop_top_spinbox") or not hasattr(self, "crop_bottom_spinbox"):
+            return
+        PresetStorage.save_crop_defaults(
+            int(self.crop_top_spinbox.value()),
+            int(self.crop_bottom_spinbox.value()),
+        )
+
+    def _collect_app_settings(self) -> dict:
+        """Collect current UI/application state for persistence."""
+        settings = {
+            "theme_mode": self._theme_mode,
+            "window": {
+                "x": int(self.x()),
+                "y": int(self.y()),
+                "width": int(self.width()),
+                "height": int(self.height()),
+            },
+            "splitter_sizes": [int(v) for v in self.main_splitter.sizes()],
+            "single_io_directory": str(self.single_io_directory or ""),
+            "batch_input_directory": str(self.batch_input_directory or ""),
+            "batch_output_directory": str(self.batch_output_directory or ""),
+            "overlay": {
+                "scalebar_enabled": bool(self.overlay_renderer.scalebar_enabled),
+                "scalebar_length_value": float(self.overlay_renderer.scalebar_length_value),
+                "scalebar_unit": str(self.overlay_renderer.scalebar_unit),
+                "scalebar_thickness": int(self.overlay_renderer.scalebar_thickness),
+                "scalebar_position": str(self.overlay_renderer.scalebar_position),
+                "bar_color": self.overlay_renderer.bar_color.name(),
+                "text_color": self.overlay_renderer.text_color.name(),
+                "scalebar_bg_enabled": bool(self.overlay_renderer.scalebar_bg_enabled),
+                "scalebar_bg_color": self.overlay_renderer.scalebar_bg_color.name(),
+                "scalebar_bg_opacity": int(self.overlay_renderer.scalebar_bg_opacity),
+                "aperture_enabled": bool(self.overlay_renderer.aperture_enabled),
+                "aperture_nominal_size": int(self.overlay_renderer.aperture_nominal_size),
+                "aperture_color": self.overlay_renderer.aperture_color.name(),
+                "measurement_enabled": bool(self.overlay_renderer.measurement_enabled),
+                "measurement_unit": str(self.overlay_renderer.measurement_unit),
+                "measurement_line_color": self.overlay_renderer.measurement_line_color.name(),
+                "measurement_text_color": self.overlay_renderer.measurement_text_color.name(),
+                "measurement_show_label": bool(self.overlay_renderer.measurement_show_label),
+                "measurement_line_width": int(self.overlay_renderer.measurement_line_width),
+            },
+        }
+        return settings
+
+    def _persist_user_state(self):
+        """Persist settings and preset payload to disk."""
+        AppSettingsStorage.save_settings(self._collect_app_settings())
+        PresetStorage.save_presets(self.presets)
+        if hasattr(self, "crop_top_spinbox") and hasattr(self, "crop_bottom_spinbox"):
+            PresetStorage.save_crop_defaults(
+                int(self.crop_top_spinbox.value()),
+                int(self.crop_bottom_spinbox.value()),
+            )
+
+    def closeEvent(self, event):
+        """Persist user settings when closing the app."""
+        self._persist_user_state()
+        super().closeEvent(event)
         
     def setup_ui(self):
         """Setup the user interface."""
@@ -420,7 +769,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         preset_layout.addLayout(pixel_size_layout)
 
         preset_info_label = QLabel(
-            "To change the pixel size of presets, go to Presets > Manage Presets in the main menu."
+            "To change the pixel size of presets, go to Settings > Manage Presets in the main menu."
         )
         preset_info_label.setWordWrap(True)
         # preset_info_label.setStyleSheet("QLabel { color: palette(mid); font-size: 10pt; }")
@@ -786,12 +1135,19 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     # Event handlers
     def load_image(self):
         """Load an image file."""
+        start_dir = self.single_io_directory
+        if not start_dir and self.current_file:
+            try:
+                start_dir = str(Path(self.current_file).parent)
+            except Exception:
+                start_dir = ""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open Image", "",
+            self, "Open Image", start_dir,
             "Image Files (*.rodhypix *.tif *.tiff *.png *.jpg *.jpeg *.bmp);;RODHyPix Files (*.rodhypix);;TIFF Files (*.tif *.tiff);;All Files (*.*)"
         )
         
         if file_path:
+            self.single_io_directory = str(Path(file_path).parent)
             success, error, dimensions, pixel_metadata = self.image_processor.load_image(file_path)
             
             if success:
@@ -904,6 +1260,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             npp = 1.0
         self.nm_per_pixel = npp
         self.presets["Custom"] = npp
+        PresetStorage.save_presets(self.presets)
         self._update_measurement_info_label()
         self.update_display()
     
@@ -1923,13 +2280,20 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             return
         
         suggested_name = Path(self.current_file).stem + "_processed.png" if self.current_file else "tem_image.png"
+        if self.single_io_directory:
+            initial_path = str(Path(self.single_io_directory) / suggested_name)
+        elif self.current_file:
+            initial_path = str(Path(self.current_file).with_name(suggested_name))
+        else:
+            initial_path = suggested_name
         
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Image", suggested_name,
+            self, "Export Image", initial_path,
             "PNG Image (*.png);;TIFF Image (*.tif *.tiff);;JPEG Image (*.jpg *.jpeg);;All Files (*.*)"
         )
         
         if file_path:
+            self.single_io_directory = str(Path(file_path).parent)
             try:
                 q_image = self.overlay_renderer.render_image_with_overlays(
                     self.image_processor.get_current_image(),
@@ -1974,7 +2338,12 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     
     def manage_presets(self):
         """Open preset manager dialog."""
-        dialog = PresetManager(self.presets, self)
+        dialog = PresetManager(
+            self.presets,
+            self,
+            preset_file=PresetStorage.get_preset_file(),
+            crop_defaults=PresetStorage.load_crop_defaults(),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.presets = dialog.get_presets()
             PresetStorage.save_presets(self.presets)
@@ -2016,17 +2385,46 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     
     def batch_annotate(self):
         """Open batch annotation dialog."""
-        dialog = BatchProcessingDialog(self.presets, self.overlay_renderer, self)
-        dialog.exec()
+        dialog = BatchProcessingDialog(
+            self.presets,
+            self.overlay_renderer,
+            self,
+            initial_input_directory=self.batch_input_directory,
+            initial_output_directory=self.batch_output_directory,
+            default_crop_top_rows=int(self.crop_top_spinbox.value()) if hasattr(self, "crop_top_spinbox") else 10,
+            default_crop_bottom_rows=int(self.crop_bottom_spinbox.value()) if hasattr(self, "crop_bottom_spinbox") else 9,
+        )
+        result = dialog.exec()
+        self.batch_input_directory, self.batch_output_directory = dialog.get_last_directories()
+        if result == QDialog.DialogCode.Accepted and hasattr(self, "crop_top_spinbox") and hasattr(self, "crop_bottom_spinbox"):
+            top_rows, bottom_rows = dialog.get_crop_defaults()
+            self.crop_top_spinbox.setValue(int(top_rows))
+            self.crop_bottom_spinbox.setValue(int(bottom_rows))
 
 
 def main():
     """Main entry point."""
     os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts.debug=false;qt.qpa.fonts.warning=false")
+
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TAMIAS")
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+
+    icon_path = get_resource_path("tamias.ico")
+    if icon_path.exists():
+        app_icon = QIcon(str(icon_path))
+        if not app_icon.isNull():
+            app.setWindowIcon(app_icon)
     
     window = TEMImageEditor()
+    if not app.windowIcon().isNull():
+        window.setWindowIcon(app.windowIcon())
     window.show()
     
     sys.exit(app.exec())

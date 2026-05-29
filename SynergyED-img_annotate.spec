@@ -16,6 +16,8 @@ a = Analysis(
     datas=[
         # Include data files as (source, dest) tuples
         ('pixelsize_presets.json', '.'),
+        ('tamias.ico', '.'),
+        ('tamias.png', '.'),
         # Include all module directories
         ('core', 'core'),
         ('gui', 'gui'),
@@ -32,7 +34,9 @@ a = Analysis(
         'gui.collapsible_box',
         'gui.crop_controller',
         'gui.crop_dialog',
+        'utils.app_settings_manager',
         'utils.preset_manager',
+        'utils.storage_paths',
         'numpy',
         'PIL',
         'PIL.Image',
@@ -95,7 +99,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='SynergyED-img_annotate',
+    name='TAMIAS',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -103,7 +107,7 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,  # GUI app (no console window)
-    icon=None,      # Set to a .ico path if you have an app icon
+    icon='tamias.ico',
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,

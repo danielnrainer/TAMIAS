@@ -1,9 +1,9 @@
 PyQt6>=6.5,<7
 numpy>=1.24,<3
 Pillow>=10,<13
-pyinstaller>=6.0
+pyinstaller>=6.0,<7
 
 # Optional dependencies for .rodhypix file support
 # numba provides ~10x speedup for rodhypix decompression
 # Install with: pip install numba
-# numba>=0.60.0
+# numba>=0.60,<1

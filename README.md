@@ -1,6 +1,16 @@
-# SynergyED Image Annotate
+# TAMIAS
 
-A PyQt6 desktop application for processing (mainly) Synergy-ED images with calibrated overlays, crop controls, particle measurement tools, and batch processing support.
+Tool for Annotation and Markup of Images from a Synergy-ED
+
+A PyQt6 desktop application for annotating and marking up real space images with calibrated overlays, crop controls, particle measurement tools, and batch processing support. Its main use is for images acquired on a Rigaku XtaLAB Synergy-ED, but can in principle be used for images from other instruments too.
+
+
+_Disclaimer_\
+The code in this project has been written in large parts by Anthropic and OpenAI LLM models.
+
+
+*Be advised that this software is in constant development and might therefore contain bugs or other unintended behaviour.
+If you encounter any issue and would like to report it or have a feature request, please do so via the [Issues](https://github.com/danielnrainer/TAMIAS/issues) section.*
 
 ## Features
 
@@ -22,6 +32,8 @@ A PyQt6 desktop application for processing (mainly) Synergy-ED images with calib
 - **Resizable Workspace**: Adjustable splitter between image pane and control pane
 - **Batch Processing**: Dedicated dialog with scrollable collapsible sections, applied/not-applied status markers, and crop/overlay/export settings
 - **Imaging Presets**: Store and manage pixel size calibrations for different imaging modes
+- **Persistent Settings**: Theme, window size, annotation defaults, preset defaults, and file-dialog folders are retained between sessions
+- **Preset Import/Export**: Load preset JSON files from other machines and save current presets back out to file
 - **Compact UI**: Laptop-friendly interface with collapsible sections and scrollable controls
 - **Multiple Export Formats**: PNG, TIFF, JPEG
 
@@ -42,8 +54,8 @@ A PyQt6 desktop application for processing (mainly) Synergy-ED images with calib
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/danielnrainer/SynergyED-img_annotate.git
-cd SynergyED-img_annotate
+git clone https://github.com/danielnrainer/TAMIAS.git
+cd TAMIAS
 ```
 
 2. Install dependencies:
@@ -63,6 +75,21 @@ Run the application:
 ```bash
 python SynergyED-img_annotate.py
 ```
+
+### App Data and Settings
+
+TAMIAS stores user-specific data in `%APPDATA%/TAMIAS` on Windows.
+
+- `settings.json` stores theme mode, window geometry, splitter sizes, annotation defaults, and remembered folders.
+- `presets.json` stores imaging presets and default top/bottom crop values.
+
+You can access these from the application via `Settings`:
+
+- `Manage Presets...`
+- `Load Presets from File...`
+- `Save Presets to File...`
+- `Select Theme`
+- `Open Settings Folder`
 
 **Basic Workflow:**
 1. Load an image (Ctrl+O)
@@ -86,7 +113,7 @@ python SynergyED-img_annotate.py
 ## Project Structure
 
 ```
-SynergyED-img_annotate/
+TAMIAS/
 ├── core/                       # Core processing modules
 │   ├── crop_geometry.py       # Crop geometry helpers
 │   ├── image_processor.py     # Image loading and adjustments
@@ -97,10 +124,15 @@ SynergyED-img_annotate/
 │   ├── crop_controller.py     # Crop interaction/controller mixin
 │   └── crop_dialog.py         # Top/bottom crop dialog
 ├── utils/                     # Utility modules
-│   └── preset_manager.py     # Preset storage and management
-├── SynergyED-img_annotate.py # Main application entry point
+│   ├── app_settings_manager.py # Persistent app settings storage
+│   ├── preset_manager.py      # Preset storage and management
+│   └── storage_paths.py       # Per-user app-data path helpers
+├── SynergyED-img_annotate.py  # Main application entry point
+├── SynergyED-img_annotate.spec # PyInstaller build specification
 ├── requirements.txt           # Python dependencies
-└── pixelsize_presets.json    # Pixel size presets
+├── pixelsize_presets.json     # Legacy preset fallback data
+├── tamias.ico                 # Application icon
+└── tamias.png                 # About dialog logo
 ```
 
 ## Requirements
@@ -138,12 +170,16 @@ SynergyED-img_annotate/
   - Original dxtbx code by David Waterman & Takanori Nakane
   - Copyright: 2018-2023 United Kingdom Research and Innovation & 2022-2023 Takanori Nakane
 
+
+
 ## Building Executable
 
 Create a standalone executable with PyInstaller:
 ```bash
 pyinstaller SynergyED-img_annotate.spec
 ```
+
+The build spec bundles both `tamias.ico` and `tamias.png` so the executable shows the app icon and the About dialog logo correctly.
 
 ## License
 
@@ -153,4 +189,9 @@ BSD 3-Clause License - see [LICENSE](LICENSE) file for details.
 
 Daniel N. Rainer (ORCID: 0000-0002-3272-3161)
 
-Project Link: [https://github.com/danielnrainer/SynergyED-img_annotate](https://github.com/danielnrainer/SynergyED-img_annotate)
+## Citation
+
+If TAMIAS contributes to your work, please cite it via Zenodo:
+
+- Zenodo DOI: [https://doi.org/10.5281/zenodo.20403971](https://doi.org/10.5281/zenodo.20403971)
+- Project Repository: [https://github.com/danielnrainer/TAMIAS](https://github.com/danielnrainer/TAMIAS)

@@ -59,7 +59,16 @@ def set_color_button_indicator(button: QPushButton, color: QColor):
 class BatchProcessingDialog(QDialog):
     """Dialog for batch processing of multiple images."""
 
-    def __init__(self, presets: dict, renderer: OverlayRenderer, parent=None):
+    def __init__(
+        self,
+        presets: dict,
+        renderer: OverlayRenderer,
+        parent=None,
+        initial_input_directory: str = "",
+        initial_output_directory: str = "",
+        default_crop_top_rows: int = 10,
+        default_crop_bottom_rows: int = 9,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Batch Processing")
         self.setModal(True)
@@ -68,6 +77,10 @@ class BatchProcessingDialog(QDialog):
         self.presets = presets
         self.renderer = renderer
         self.files = []
+        self.last_input_directory = str(initial_input_directory or "")
+        self.last_output_directory = str(initial_output_directory or "")
+        self.default_crop_top_rows = max(0, int(default_crop_top_rows))
+        self.default_crop_bottom_rows = max(0, int(default_crop_bottom_rows))
 
         self._setup_ui()
 
@@ -145,13 +158,13 @@ class BatchProcessingDialog(QDialog):
         crop_rows_layout.addWidget(QLabel("Top rows:"))
         self.batch_crop_top_spinbox = QSpinBox()
         self.batch_crop_top_spinbox.setRange(0, 100000)
-        self.batch_crop_top_spinbox.setValue(10)
+        self.batch_crop_top_spinbox.setValue(self.default_crop_top_rows)
         crop_rows_layout.addWidget(self.batch_crop_top_spinbox)
 
         crop_rows_layout.addWidget(QLabel("Bottom rows:"))
         self.batch_crop_bottom_spinbox = QSpinBox()
         self.batch_crop_bottom_spinbox.setRange(0, 100000)
-        self.batch_crop_bottom_spinbox.setValue(9)
+        self.batch_crop_bottom_spinbox.setValue(self.default_crop_bottom_rows)
         crop_rows_layout.addWidget(self.batch_crop_bottom_spinbox)
         crop_layout.addLayout(crop_rows_layout)
 
@@ -335,6 +348,9 @@ class BatchProcessingDialog(QDialog):
 
         self.setLayout(root_layout)
 
+        if self.last_output_directory:
+            self.output_folder_edit.setText(self.last_output_directory)
+
         self._update_batch_section_titles()
         self._on_preset_changed("Standard")
 
@@ -361,10 +377,14 @@ class BatchProcessingDialog(QDialog):
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Select Images",
-            "",
+            self.last_input_directory,
             "Image Files (*.rodhypix *.tif *.tiff *.png *.jpg *.jpeg *.bmp);;RODHyPix Files (*.rodhypix);;TIFF Files (*.tif *.tiff);;All Files (*.*)",
         )
         if files:
+            try:
+                self.last_input_directory = str(Path(files[0]).parent)
+            except Exception:
+                pass
             for file in files:
                 if file not in self.files:
                     self.files.append(file)
@@ -429,9 +449,19 @@ class BatchProcessingDialog(QDialog):
             set_color_button_indicator(self.aperture_color_btn, self.aperture_color)
 
     def _choose_output_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        start_dir = self.last_output_directory or self.last_input_directory
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder", start_dir)
         if folder:
+            self.last_output_directory = str(folder)
             self.output_folder_edit.setText(folder)
+
+    def get_last_directories(self) -> tuple[str, str]:
+        """Return latest batch input/output directory preferences."""
+        return self.last_input_directory, self.last_output_directory
+
+    def get_crop_defaults(self) -> tuple[int, int]:
+        """Return current batch crop defaults (top_rows, bottom_rows)."""
+        return int(self.batch_crop_top_spinbox.value()), int(self.batch_crop_bottom_spinbox.value())
 
     def _on_batch_scalebar_length_text_edited(self, text: str):
         self._batch_scalebar_length_text_raw = text
