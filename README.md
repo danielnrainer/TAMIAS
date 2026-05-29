@@ -73,7 +73,7 @@ pip install numba
 
 Run the application:
 ```bash
-python SynergyED-img_annotate.py
+python TAMIAS.py
 ```
 
 ### App Data and Settings
@@ -127,8 +127,8 @@ TAMIAS/
 │   ├── app_settings_manager.py # Persistent app settings storage
 │   ├── preset_manager.py      # Preset storage and management
 │   └── storage_paths.py       # Per-user app-data path helpers
-├── SynergyED-img_annotate.py  # Main application entry point
-├── SynergyED-img_annotate.spec # PyInstaller build specification
+├── TAMIAS.py                  # Main application entry point
+├── TAMIAS.spec                # PyInstaller build specification
 ├── requirements.txt           # Python dependencies
 ├── pixelsize_presets.json     # Legacy preset fallback data
 ├── tamias.ico                 # Application icon
@@ -176,7 +176,7 @@ TAMIAS/
 
 Create a standalone executable with PyInstaller:
 ```bash
-pyinstaller SynergyED-img_annotate.spec
+pyinstaller TAMIAS.spec
 ```
 
 The build spec bundles both `tamias.ico` and `tamias.png` so the executable shows the app icon and the About dialog logo correctly.

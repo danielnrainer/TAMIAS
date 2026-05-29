@@ -10,7 +10,7 @@ block_cipher = None
 
 
 a = Analysis(
-    ['SynergyED-img_annotate.py'],
+    ['TAMIAS.py'],
     pathex=[],
     binaries=[],
     datas=[
