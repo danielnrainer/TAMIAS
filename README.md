@@ -179,7 +179,6 @@ Create a standalone executable with PyInstaller:
 pyinstaller TAMIAS.spec
 ```
 
-The build spec bundles both `tamias.ico` and `tamias.png` so the executable shows the app icon and the About dialog logo correctly.
 
 ## License
 
@@ -187,7 +186,7 @@ BSD 3-Clause License - see [LICENSE](LICENSE) file for details.
 
 ## Author
 
-Daniel N. Rainer (ORCID: 0000-0002-3272-3161)
+Daniel N. Rainer (ORCID: [0000-0002-3272-3161](https://orcid.org/0000-0002-3272-3161))
 
 ## Citation
 
