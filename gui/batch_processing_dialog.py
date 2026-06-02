@@ -170,7 +170,7 @@ class BatchProcessingDialog(QDialog):
 
         crop_hint = QLabel("Applied immediately after image load and before adjustments/overlays.")
         crop_hint.setWordWrap(True)
-        crop_hint.setStyleSheet("QLabel { color: palette(mid); font-size: 10pt; }")
+        crop_hint.setStyleSheet("font-style: italic")
         crop_layout.addWidget(crop_hint)
 
         crop_box.setContentLayout(crop_layout)

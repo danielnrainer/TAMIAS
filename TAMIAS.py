@@ -388,7 +388,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             logo_label.setPixmap(logo_pixmap)
         else:
             logo_label.setText("TAMIAS")
-            logo_label.setStyleSheet("QLabel { font-weight: bold; font-size: 16pt; }")
+            logo_label.setStyleSheet("font-weight: bold; font-size: 16pt")
 
         left_panel.addWidget(logo_label)
         left_panel.addStretch()
@@ -668,7 +668,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         image_layout.addWidget(self.image_label)
         
         self.file_info_label = QLabel("No file loaded")
-        self.file_info_label.setStyleSheet("QLabel { color: palette(mid); padding: 5px; }")
+        self.file_info_label.setStyleSheet("QLabel { font-style: italic; padding: 5px; }")
         image_layout.addWidget(self.file_info_label)
         image_widget.setLayout(image_layout)
         
@@ -772,8 +772,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             "To change the pixel size of presets, go to Settings > Manage Presets in the main menu."
         )
         preset_info_label.setWordWrap(True)
-        # preset_info_label.setStyleSheet("QLabel { color: palette(mid); font-size: 10pt; }")
-        preset_info_label.setStyleSheet("QLabel { font-style: italic; }")
+        preset_info_label.setStyleSheet("font-style: italic")
         preset_layout.addWidget(preset_info_label)
         
         # Set default preset
@@ -976,7 +975,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         aperture_layout.addLayout(size_layout)
         
         self.aperture_info_label = QLabel("Apparent diameter: 2.0 µm")
-        self.aperture_info_label.setStyleSheet("QLabel { color: palette(mid); font-size: 10pt; }")
+        self.aperture_info_label.setStyleSheet("font-style: italic")
         aperture_layout.addWidget(self.aperture_info_label)
         
         # Color
@@ -1118,7 +1117,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self.measurement_status_label = QLabel(
             "Enable 'Show Annotations', then click 'Draw Measurement' and drag on the image."
         )
-        self.measurement_status_label.setStyleSheet("QLabel { color: palette(mid); font-size: 10pt; }")
+        self.measurement_status_label.setStyleSheet("font-style: italic")
         self.measurement_status_label.setWordWrap(True)
         measurement_layout.addWidget(self.measurement_status_label)
 
