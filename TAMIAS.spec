@@ -41,6 +41,7 @@ a = Analysis(
         'gui.theme_manager',
         'gui.ui_sections',
         'utils.app_settings_manager',
+        'utils.imaging_mode_defaults',
         'utils.preset_manager',
         'utils.storage_paths',
         'numpy',
