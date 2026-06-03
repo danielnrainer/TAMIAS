@@ -158,6 +158,12 @@ def setup_scalebar_controls(editor: Any, parent_layout):
     editor.unit_combo = QComboBox()
     editor.unit_combo.addItems(["nm", "µm"])
     editor.unit_combo.currentTextChanged.connect(editor.on_scalebar_unit_changed)
+    mode_unit = editor._get_mode_dependent_unit(editor.preset_combo.currentText()) if hasattr(editor, "preset_combo") else None
+    if mode_unit is not None:
+        editor.unit_combo.blockSignals(True)
+        editor.unit_combo.setCurrentText(mode_unit)
+        editor.unit_combo.blockSignals(False)
+        editor.overlay_renderer.scalebar_unit = mode_unit
     length_layout.addWidget(editor.unit_combo)
     scalebar_layout.addLayout(length_layout)
 
@@ -308,6 +314,12 @@ def setup_measurement_controls(editor: Any, parent_layout):
     editor.measurement_unit_combo = QComboBox()
     editor.measurement_unit_combo.addItems(["nm", "µm"])
     editor.measurement_unit_combo.currentTextChanged.connect(editor.on_measurement_changed)
+    mode_unit = editor._get_mode_dependent_unit(editor.preset_combo.currentText()) if hasattr(editor, "preset_combo") else None
+    if mode_unit is not None:
+        editor.measurement_unit_combo.blockSignals(True)
+        editor.measurement_unit_combo.setCurrentText(mode_unit)
+        editor.measurement_unit_combo.blockSignals(False)
+        editor.overlay_renderer.measurement_unit = mode_unit
     unit_layout.addWidget(editor.measurement_unit_combo)
     measurement_layout.addLayout(unit_layout)
 
@@ -397,6 +409,7 @@ def setup_measurement_controls(editor: Any, parent_layout):
     editor.move_label_btn.setEnabled(False)
     editor.measurement_start_end_combo.setEnabled(True)
     editor.measurement_end_end_combo.setEnabled(True)
+    editor.on_measurement_toggled(editor.measurement_checkbox.checkState().value)
 
     measurement_box.setContentLayout(measurement_layout)
     measurement_box.toggleButton.toggled.connect(editor._on_measurement_section_toggled)

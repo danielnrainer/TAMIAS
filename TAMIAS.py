@@ -29,6 +29,7 @@ from core.overlay_renderer import OverlayRenderer
 from core.crop_geometry import compute_display_mapping, map_label_to_image_coords, point_to_segment_distance
 from utils.preset_manager import PresetManager, PresetStorage
 from utils.app_settings_manager import AppSettingsStorage
+from utils.imaging_mode_defaults import get_mode_overlay_defaults
 from utils.storage_paths import ensure_app_storage_dir
 from gui.custom_widgets import (
     ClickClearTableWidget,
@@ -748,18 +749,31 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             
             self.nm_per_pixel = npp
             
+            defaults = get_mode_overlay_defaults(preset_name)
+            mode_unit = defaults["unit"] if defaults is not None else None
+
             # Set preset-specific scalebar defaults (only if UI is fully initialized)
-            if hasattr(self, 'unit_combo') and hasattr(self, 'scalebar_length_spinbox'):
-                if preset_name == "Standard":
-                    self.unit_combo.setCurrentText("µm")
-                    self.scalebar_length_spinbox.setValue(5.0)
-                    self.scalebar_length_text_raw = "5"
-                elif preset_name == "High Res":
-                    self.unit_combo.setCurrentText("nm")
-                    self.scalebar_length_spinbox.setValue(500.0)
-                    self.scalebar_length_text_raw = "500"
+            if defaults is not None and hasattr(self, 'unit_combo') and hasattr(self, 'scalebar_length_spinbox'):
+                if self.unit_combo.currentText() != defaults["unit"]:
+                    self.unit_combo.setCurrentText(defaults["unit"])
+                self.scalebar_length_spinbox.setValue(defaults["scalebar_length_value"])
+                self.scalebar_length_text_raw = defaults["scalebar_length_text"]
+
+            if mode_unit is not None and hasattr(self, 'measurement_unit_combo') and self.measurement_unit_combo.currentText() != mode_unit:
+                self.measurement_unit_combo.setCurrentText(mode_unit)
 
             self._refresh_scale_information()
+
+    def _get_mode_dependent_unit(self, preset_name: str) -> str | None:
+        """Return the measurement/scalebar unit associated with the active image mode."""
+        defaults = get_mode_overlay_defaults(preset_name)
+        if defaults is not None:
+            return defaults["unit"]
+        return None
+
+    def _get_mode_dependent_scalebar_defaults(self, preset_name: str) -> dict | None:
+        """Compatibility wrapper around shared imaging-mode overlay defaults."""
+        return get_mode_overlay_defaults(preset_name)
 
     def _refresh_scale_information(self):
         """Refresh scale-dependent UI and overlays after calibration or preset updates."""
@@ -1676,12 +1690,12 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     def _apply_initial_scalebar_defaults(self):
         """Apply initial scalebar defaults for the default preset."""
         current_preset = self.preset_combo.currentText()
-        if current_preset == "Standard":
-            self.unit_combo.setCurrentText("µm")
-            self.scalebar_length_spinbox.setValue(5)
-        elif current_preset == "High Res":
-            self.unit_combo.setCurrentText("nm")
-            self.scalebar_length_spinbox.setValue(500)
+        defaults = self._get_mode_dependent_scalebar_defaults(current_preset)
+        if defaults is None:
+            return
+        self.unit_combo.setCurrentText(defaults["unit"])
+        self.scalebar_length_spinbox.setValue(defaults["scalebar_length_value"])
+        self.scalebar_length_text_raw = defaults["scalebar_length_text"]
     
     def resizeEvent(self, event):
         """Handle window resize."""

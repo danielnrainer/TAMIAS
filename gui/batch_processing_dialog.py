@@ -34,6 +34,7 @@ from core.image_processor import ImageProcessor
 from core.overlay_renderer import OverlayRenderer
 from gui.collapsible_box import QCollapsibleBox
 from gui.custom_widgets import SmartDoubleSpinBox, set_color_button_indicator
+from utils.imaging_mode_defaults import get_mode_overlay_defaults
 
 
 class BatchProcessingDialog(QDialog):
@@ -395,14 +396,11 @@ class BatchProcessingDialog(QDialog):
             self.pixel_size_spinbox.setValue(npp)
             self.pixel_unit_combo.setCurrentText("nm")
 
-            if preset_name == "Standard":
-                self.scalebar_unit_combo.setCurrentText("µm")
-                self.scalebar_length_spinbox.setValue(5.0)
-                self._batch_scalebar_length_text_raw = "5"
-            elif preset_name == "High Res":
-                self.scalebar_unit_combo.setCurrentText("nm")
-                self.scalebar_length_spinbox.setValue(500.0)
-                self._batch_scalebar_length_text_raw = "500"
+            defaults = get_mode_overlay_defaults(preset_name)
+            if defaults is not None:
+                self.scalebar_unit_combo.setCurrentText(defaults["unit"])
+                self.scalebar_length_spinbox.setValue(defaults["scalebar_length_value"])
+                self._batch_scalebar_length_text_raw = defaults["scalebar_length_text"]
 
     def _choose_bar_color(self):
         color = QColorDialog.getColor(self.bar_color, self, "Choose Scalebar Bar Color")
