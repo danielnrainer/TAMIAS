@@ -1135,7 +1135,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         """Choose measurement line color."""
         if row_override is not None:
             selected_rows = self._get_selected_measurement_rows()
-            target_rows = selected_rows if row_override in selected_rows else [row_override]
+            target_rows = selected_rows if selected_rows and row_override in selected_rows else []
         else:
             target_rows = self._get_selected_measurement_rows()
 
@@ -1164,7 +1164,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         """Choose measurement label color."""
         if row_override is not None:
             selected_rows = self._get_selected_measurement_rows()
-            target_rows = selected_rows if row_override in selected_rows else [row_override]
+            target_rows = selected_rows if selected_rows and row_override in selected_rows else []
         else:
             target_rows = self._get_selected_measurement_rows()
 
