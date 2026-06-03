@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -28,3 +29,15 @@ def ensure_app_storage_dir(app_name: str = APP_NAME) -> Path:
     path = get_app_storage_dir(app_name)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_project_root() -> Path:
+    """Return project root for source runs or bundle root for PyInstaller builds."""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).resolve().parent.parent
+
+
+def get_project_resource_path(relative_path: str) -> Path:
+    """Resolve a resource file path relative to the project/bundle root."""
+    return get_project_root() / relative_path

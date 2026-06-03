@@ -7,47 +7,33 @@ import json
 from pathlib import Path
 from typing import Any
 
-from utils.storage_paths import ensure_app_storage_dir
+from utils.storage_paths import ensure_app_storage_dir, get_project_resource_path
 
 
-DEFAULT_SETTINGS: dict[str, Any] = {
-    "theme_mode": "auto",
-    "window": {
-        "x": 100,
-        "y": 100,
-        "width": 1100,
-        "height": 700,
-    },
-    "splitter_sizes": [900, 350],
-    "single_io_directory": "",
-    "batch_input_directory": "",
-    "batch_output_directory": "",
-    "overlay": {
-        "scalebar_enabled": True,
-        "scalebar_length_value": 100.0,
-        "scalebar_unit": "nm",
-        "scalebar_thickness": 15,
-        "scalebar_position": "bottom-right",
-        "bar_color": "#FFFFFF",
-        "text_color": "#FFFFFF",
-        "scalebar_bg_enabled": True,
-        "scalebar_bg_color": "#000000",
-        "scalebar_bg_opacity": 255,
-        "aperture_enabled": False,
-        "aperture_nominal_size": 100,
-        "aperture_color": "#FFFF00",
-        "measurement_enabled": False,
-        "measurement_unit": "nm",
-        "measurement_line_color": "#00FF00",
-        "measurement_text_color": "#00FF00",
-        "measurement_show_label": True,
-        "measurement_line_width": 4,
-    },
-}
+def _load_shipped_default_settings() -> dict[str, Any]:
+    """Load shipped app defaults from repository/bundle resource JSON."""
+    defaults_file = get_project_resource_path("settings_defaults.json")
+    try:
+        with open(defaults_file, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            raise ValueError("Expected JSON object at root")
+        return loaded
+    except Exception as e:
+        print(f"Error loading shipped app defaults from {defaults_file}: {e}")
+        return {}
+
+
+SHIPPED_DEFAULT_SETTINGS = _load_shipped_default_settings()
 
 
 class AppSettingsStorage:
     """Load/save non-preset app settings."""
+
+    @staticmethod
+    def get_default_settings() -> dict[str, Any]:
+        """Return a deep-copied view of shipped default app settings."""
+        return copy.deepcopy(SHIPPED_DEFAULT_SETTINGS)
 
     @staticmethod
     def get_settings_file() -> Path:
@@ -67,7 +53,7 @@ class AppSettingsStorage:
 
     @staticmethod
     def load_settings() -> dict[str, Any]:
-        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        settings = AppSettingsStorage.get_default_settings()
         settings_file = AppSettingsStorage.get_settings_file()
         if not settings_file.exists():
             return settings
@@ -88,3 +74,10 @@ class AppSettingsStorage:
                 json.dump(settings, f, indent=2)
         except Exception as e:
             print(f"Error saving app settings: {e}")
+
+    @staticmethod
+    def reset_to_defaults() -> dict[str, Any]:
+        """Reset persisted app settings to shipped defaults and return them."""
+        settings = AppSettingsStorage.get_default_settings()
+        AppSettingsStorage.save_settings(settings)
+        return settings

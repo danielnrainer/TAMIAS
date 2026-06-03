@@ -19,100 +19,27 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QAbstractItemView,
     QProgressDialog, QScrollArea, QSplitter, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QModelIndex, QSize, QUrl
+from PyQt6.QtCore import Qt, QTimer, QSize, QUrl
 from PyQt6.QtGui import QPixmap, QImage, QAction, QActionGroup, QColor, QFont, QPalette, QBrush, QIcon, QDesktopServices
 from PyQt6.QtWidgets import QColorDialog, QFontDialog
-
-# Helpers
-class SmartDoubleSpinBox(QDoubleSpinBox):
-    """A QDoubleSpinBox that displays integers without decimals and
-    non-integers with up to 2 decimals (without trailing zeros)."""
-    def textFromValue(self, value: float) -> str:  # type: ignore[override]
-        try:
-            if abs(value - round(value)) < 1e-9:
-                return str(int(round(value)))
-            # Show up to 2 decimals without trailing zeros
-            return (f"{value:.2f}").rstrip('0').rstrip('.')
-        except Exception:
-            return super().textFromValue(value)
-
-
-class ImageDisplayLabel(QLabel):
-    """Image label that supports both click-drag (draw) and label-drag (move) modes."""
-    clicked = pyqtSignal(int, int)
-    mouse_pressed = pyqtSignal(int, int)
-    mouse_moved = pyqtSignal(int, int)
-    mouse_released = pyqtSignal(int, int)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._draw_mode = False
-        self._label_drag_mode = False
-
-    def set_draw_mode(self, active: bool):
-        self._draw_mode = active
-        self._label_drag_mode = False
-        self.setCursor(Qt.CursorShape.CrossCursor if active else Qt.CursorShape.ArrowCursor)
-
-    def set_label_drag_mode(self, active: bool):
-        self._label_drag_mode = active
-        self._draw_mode = False
-        self.setCursor(Qt.CursorShape.OpenHandCursor if active else Qt.CursorShape.ArrowCursor)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            x, y = int(event.position().x()), int(event.position().y())
-            if self._draw_mode or self._label_drag_mode:
-                self.mouse_pressed.emit(x, y)
-                if self._label_drag_mode:
-                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            else:
-                self.clicked.emit(x, y)
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if (self._draw_mode or self._label_drag_mode) and (event.buttons() & Qt.MouseButton.LeftButton):
-            self.mouse_moved.emit(int(event.position().x()), int(event.position().y()))
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and (self._draw_mode or self._label_drag_mode):
-            self.mouse_released.emit(int(event.position().x()), int(event.position().y()))
-            if self._label_drag_mode:
-                self.setCursor(Qt.CursorShape.OpenHandCursor)
-        super().mouseReleaseEvent(event)
-
-
-class ClickClearTableWidget(QTableWidget):
-    """A QTableWidget that clears selection when clicking empty table space."""
-
-    def mousePressEvent(self, event):  # type: ignore[override]
-        idx = self.indexAt(event.pos())
-        if not idx.isValid():
-            self.clearSelection()
-            self.setCurrentIndex(QModelIndex())
-        super().mousePressEvent(event)
-
-    def selected_rows(self) -> list[int]:
-        """Return selected row indices in ascending order."""
-        rows = {idx.row() for idx in self.selectionModel().selectedRows()}
-        return sorted(rows)
-
-
-def set_color_button_indicator(button: QPushButton, color: QColor):
-    """Show a small color swatch icon on color-picker buttons."""
-    swatch_size = 14
-    pixmap = QPixmap(swatch_size, swatch_size)
-    pixmap.fill(QColor(color))
-    button.setIcon(QIcon(pixmap))
-    button.setIconSize(QSize(swatch_size, swatch_size))
 
 # Import our modules
 from core.image_processor import ImageProcessor
 from core.overlay_renderer import OverlayRenderer
+from core.crop_geometry import compute_display_mapping, map_label_to_image_coords, point_to_segment_distance
 from utils.preset_manager import PresetManager, PresetStorage
 from utils.app_settings_manager import AppSettingsStorage
 from utils.storage_paths import ensure_app_storage_dir
+from gui.custom_widgets import (
+    ClickClearTableWidget,
+    ImageDisplayLabel,
+    SmartDoubleSpinBox,
+    set_color_button_indicator,
+)
+from gui.theme_manager import ThemeManager
+from gui.app_state_manager import AppStateManager
+from gui.measurement_interaction import MeasurementInteractionController
+from gui import ui_sections
 from gui.collapsible_box import QCollapsibleBox
 from gui.crop_controller import CropControllerMixin
 from gui.batch_processing_dialog import BatchProcessingDialog
@@ -136,6 +63,9 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self.setGeometry(100, 100, 1100, 700)
 
         self._app_settings = AppSettingsStorage.load_settings()
+        self._theme_manager = ThemeManager()
+        self._app_state_manager = AppStateManager()
+        self._measurement_interaction = MeasurementInteractionController(self)
         
         # Initialize modules
         self.image_processor = ImageProcessor()
@@ -169,12 +99,16 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self._last_rendered_image_size: Optional[tuple[int, int]] = None
         
         # Load presets
+        default_payload = PresetStorage.get_default_payload()
+        default_custom_value = float(default_payload.get("pixel_size_presets", {}).get("Custom", 1.0))
         self.presets = PresetStorage.load_presets()
         if "Custom" not in self.presets:
-            self.presets["Custom"] = 1.0
+            self.presets["Custom"] = default_custom_value
         crop_defaults = PresetStorage.load_crop_defaults()
-        self._default_crop_top_rows = int(crop_defaults.get("top_rows", 10))
-        self._default_crop_bottom_rows = int(crop_defaults.get("bottom_rows", 9))
+        shipped_crop_defaults = dict(default_payload.get("crop_defaults", {}))
+        self._default_crop_top_rows = int(crop_defaults.get("top_rows", shipped_crop_defaults.get("top_rows", 0)))
+        self._default_crop_bottom_rows = int(crop_defaults.get("bottom_rows", shipped_crop_defaults.get("bottom_rows", 0)))
+        self._session_preset_baseline = PresetStorage.normalize_payload(PresetStorage.load_preset_payload())
         
         # Setup UI
         self.setup_ui()
@@ -257,6 +191,16 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
         settings_menu.addSeparator()
 
+        restore_default_presets_action = QAction("Restore Presets to TAMIAS Defaults", self)
+        restore_default_presets_action.triggered.connect(self.restore_default_presets)
+        settings_menu.addAction(restore_default_presets_action)
+
+        restore_default_app_settings_action = QAction("Restore App Settings to TAMIAS Defaults", self)
+        restore_default_app_settings_action.triggered.connect(self.restore_default_app_settings)
+        settings_menu.addAction(restore_default_app_settings_action)
+
+        settings_menu.addSeparator()
+
         theme_menu = settings_menu.addMenu("Select Theme")
         open_settings_folder_action = QAction("Open Settings Folder", self)
         open_settings_folder_action.triggered.connect(self.open_settings_folder)
@@ -309,21 +253,24 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             return
 
         try:
-            payload = PresetStorage.import_presets_from_file(Path(file_path))
+            payload = PresetStorage.load_preset_payload_from_file(Path(file_path))
         except Exception as e:
             QMessageBox.critical(self, "Preset Import", f"Failed to import presets:\n{e}")
             return
 
+        default_payload = PresetStorage.get_default_payload()
+        default_custom_value = float(default_payload.get("pixel_size_presets", {}).get("Custom", 1.0))
         imported_presets = dict(payload.get("pixel_size_presets", {}))
         if "Custom" not in imported_presets:
-            imported_presets["Custom"] = 1.0
+            imported_presets["Custom"] = default_custom_value
         self.presets = imported_presets
         self._update_preset_combo()
 
         crop_defaults = dict(payload.get("crop_defaults", {}))
+        shipped_crop_defaults = dict(default_payload.get("crop_defaults", {}))
         if hasattr(self, "crop_top_spinbox") and hasattr(self, "crop_bottom_spinbox"):
-            self.crop_top_spinbox.setValue(max(0, int(crop_defaults.get("top_rows", 10))))
-            self.crop_bottom_spinbox.setValue(max(0, int(crop_defaults.get("bottom_rows", 9))))
+            self.crop_top_spinbox.setValue(max(0, int(crop_defaults.get("top_rows", shipped_crop_defaults.get("top_rows", 0)))))
+            self.crop_bottom_spinbox.setValue(max(0, int(crop_defaults.get("bottom_rows", shipped_crop_defaults.get("bottom_rows", 0)))))
 
         self.single_io_directory = str(Path(file_path).parent)
         QMessageBox.information(
@@ -334,7 +281,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
     def save_presets_to_file(self):
         """Export current presets and crop defaults to an external JSON file."""
-        start_dir = self.single_io_directory or str(ensure_app_storage_dir())
+        start_dir = str(ensure_app_storage_dir())
         suggested_file = str(Path(start_dir) / "tamias_presets.json")
         file_path, _ = QFileDialog.getSaveFileName(
             self,
@@ -361,6 +308,71 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
         self.single_io_directory = str(Path(file_path).parent)
         QMessageBox.information(self, "Preset Export", f"Saved presets to:\n{file_path}")
+
+    def restore_default_presets(self):
+        """Restore shipped default imaging presets and crop defaults."""
+        answer = QMessageBox.question(
+            self,
+            "Restore Presets",
+            "Restore shipped TAMIAS default presets and crop defaults?\n\n"
+            "This will overwrite your current preset defaults.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        payload = PresetStorage.get_default_payload()
+        default_payload = PresetStorage.get_default_payload()
+        default_custom_value = float(default_payload.get("pixel_size_presets", {}).get("Custom", 1.0))
+        self.presets = dict(payload.get("pixel_size_presets", {}))
+        if "Custom" not in self.presets:
+            self.presets["Custom"] = default_custom_value
+        self._update_preset_combo()
+
+        crop_defaults = dict(payload.get("crop_defaults", {}))
+        shipped_crop_defaults = dict(default_payload.get("crop_defaults", {}))
+        self._default_crop_top_rows = int(crop_defaults.get("top_rows", shipped_crop_defaults.get("top_rows", 0)))
+        self._default_crop_bottom_rows = int(crop_defaults.get("bottom_rows", shipped_crop_defaults.get("bottom_rows", 0)))
+        if hasattr(self, "crop_top_spinbox") and hasattr(self, "crop_bottom_spinbox"):
+            self.crop_top_spinbox.setValue(max(0, self._default_crop_top_rows))
+            self.crop_bottom_spinbox.setValue(max(0, self._default_crop_bottom_rows))
+
+        if hasattr(self, "preset_combo"):
+            self.on_preset_changed(self.preset_combo.currentText())
+
+        QMessageBox.information(self, "Restore Presets", "Shipped TAMIAS preset defaults were restored.")
+
+    def restore_default_app_settings(self):
+        """Restore shipped default app settings and apply them immediately."""
+        answer = QMessageBox.question(
+            self,
+            "Restore App Settings",
+            "Restore shipped TAMIAS app settings defaults?\n\n"
+            "This will overwrite persisted theme, window layout, directories, and overlay defaults.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self._app_settings = AppSettingsStorage.reset_to_defaults()
+        self.single_io_directory = str(self._app_settings.get("single_io_directory", ""))
+        self.batch_input_directory = str(self._app_settings.get("batch_input_directory", ""))
+        self.batch_output_directory = str(self._app_settings.get("batch_output_directory", ""))
+
+        self._apply_overlay_settings(self._app_settings.get("overlay", {}))
+        self._apply_overlay_settings_to_controls()
+
+        saved_theme = str(self._app_settings.get("theme_mode", "auto"))
+        self._theme_mode = saved_theme if saved_theme in {"auto", "light", "dark"} else "auto"
+        self._apply_theme_mode(self._theme_mode)
+
+        self._restore_window_state_from_settings()
+        if self.image_processor.has_image():
+            self.update_display()
+
+        QMessageBox.information(self, "Restore App Settings", "Shipped TAMIAS app settings were restored.")
 
     def show_about_dialog(self):
         """Show app information and citation links in a compact custom dialog."""
@@ -431,215 +443,98 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         dialog.exec()
 
     def _sync_theme_action_checks(self):
-        if not hasattr(self, "theme_actions"):
-            return
-        for mode, action in self.theme_actions.items():
-            action.setChecked(mode == self._theme_mode)
+        self._theme_manager.sync_action_checks(getattr(self, "theme_actions", None))
+        self._theme_mode = self._theme_manager.mode
 
     def _is_system_dark_mode(self) -> bool:
-        app = QApplication.instance()
-        if app is None:
-            return False
-        try:
-            return app.styleHints().colorScheme() == Qt.ColorScheme.Dark
-        except Exception:
-            window_color = app.palette().color(QPalette.ColorRole.Window)
-            return window_color.lightness() < 128
+        return self._theme_manager.is_system_dark_mode()
 
     def _create_dark_palette(self) -> QPalette:
-        pal = QPalette()
-        pal.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
-        pal.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
-        pal.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
-        pal.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
-        pal.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.white)
-        pal.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
-        pal.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
-        pal.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
-        pal.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
-        pal.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
-        pal.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
-        pal.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
-        pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(127, 127, 127))
-        pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(127, 127, 127))
-        pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(127, 127, 127))
-        return pal
+        return self._theme_manager.create_dark_palette()
 
     def _apply_theme_mode(self, mode: str):
-        app = QApplication.instance()
-        if app is None:
-            return
-
-        resolved_mode = mode
-        if mode == "auto":
-            resolved_mode = "dark" if self._is_system_dark_mode() else "light"
-
-        if resolved_mode == "dark":
-            app.setPalette(self._create_dark_palette())
-        else:
-            app.setPalette(app.style().standardPalette())
-
-        self._theme_mode = mode
-        self._sync_theme_action_checks()
+        self._theme_manager.apply_theme_mode(mode, getattr(self, "theme_actions", None))
+        self._theme_mode = self._theme_manager.mode
 
     def _on_system_color_scheme_changed(self, _scheme):
-        if self._theme_mode == "auto":
-            self._apply_theme_mode("auto")
+        self._theme_manager.on_system_color_scheme_changed(_scheme, getattr(self, "theme_actions", None))
+        self._theme_mode = self._theme_manager.mode
 
     def _apply_overlay_settings(self, settings: dict):
-        """Apply persisted overlay defaults to the renderer before UI setup."""
-        if not isinstance(settings, dict):
-            return
-
-        def _as_bool(key: str, current: bool) -> bool:
-            return bool(settings.get(key, current))
-
-        def _as_int(key: str, current: int, min_value: int, max_value: int) -> int:
-            try:
-                value = int(settings.get(key, current))
-            except Exception:
-                value = current
-            return max(min_value, min(max_value, value))
-
-        def _as_float(key: str, current: float, min_value: float, max_value: float) -> float:
-            try:
-                value = float(settings.get(key, current))
-            except Exception:
-                value = current
-            return max(min_value, min(max_value, value))
-
-        def _as_color(key: str, current: QColor) -> QColor:
-            raw = settings.get(key)
-            color = QColor(raw) if raw is not None else QColor(current)
-            return color if color.isValid() else QColor(current)
-
-        self.overlay_renderer.scalebar_enabled = _as_bool("scalebar_enabled", self.overlay_renderer.scalebar_enabled)
-        self.overlay_renderer.scalebar_length_value = _as_float("scalebar_length_value", self.overlay_renderer.scalebar_length_value, 0.01, 10000.0)
-        unit = str(settings.get("scalebar_unit", self.overlay_renderer.scalebar_unit))
-        self.overlay_renderer.scalebar_unit = unit if unit in {"nm", "µm"} else "nm"
-        self.overlay_renderer.scalebar_thickness = _as_int("scalebar_thickness", self.overlay_renderer.scalebar_thickness, 5, 100)
-        position = str(settings.get("scalebar_position", self.overlay_renderer.scalebar_position))
-        self.overlay_renderer.scalebar_position = position if position in {"bottom-right", "bottom-left", "top-right", "top-left", "custom"} else "bottom-right"
-        self.overlay_renderer.bar_color = _as_color("bar_color", self.overlay_renderer.bar_color)
-        self.overlay_renderer.text_color = _as_color("text_color", self.overlay_renderer.text_color)
-        self.overlay_renderer.scalebar_bg_enabled = _as_bool("scalebar_bg_enabled", self.overlay_renderer.scalebar_bg_enabled)
-        self.overlay_renderer.scalebar_bg_color = _as_color("scalebar_bg_color", self.overlay_renderer.scalebar_bg_color)
-        self.overlay_renderer.scalebar_bg_opacity = _as_int("scalebar_bg_opacity", self.overlay_renderer.scalebar_bg_opacity, 0, 255)
-
-        self.overlay_renderer.aperture_enabled = _as_bool("aperture_enabled", self.overlay_renderer.aperture_enabled)
-        self.overlay_renderer.aperture_nominal_size = _as_int("aperture_nominal_size", self.overlay_renderer.aperture_nominal_size, 1, 10000)
-        self.overlay_renderer.aperture_color = _as_color("aperture_color", self.overlay_renderer.aperture_color)
-
-        self.overlay_renderer.measurement_enabled = _as_bool("measurement_enabled", self.overlay_renderer.measurement_enabled)
-        m_unit = str(settings.get("measurement_unit", self.overlay_renderer.measurement_unit))
-        self.overlay_renderer.measurement_unit = m_unit if m_unit in {"nm", "µm"} else "nm"
-        self.overlay_renderer.measurement_line_color = _as_color("measurement_line_color", self.overlay_renderer.measurement_line_color)
-        self.overlay_renderer.measurement_text_color = _as_color("measurement_text_color", self.overlay_renderer.measurement_text_color)
-        self.overlay_renderer.measurement_show_label = _as_bool("measurement_show_label", self.overlay_renderer.measurement_show_label)
-        self.overlay_renderer.measurement_line_width = _as_int("measurement_line_width", self.overlay_renderer.measurement_line_width, 1, 20)
+        self._app_state_manager.apply_overlay_settings(self, settings)
 
     def _apply_overlay_settings_to_controls(self):
-        """Sync UI controls from renderer values loaded from persisted settings."""
-        self.scalebar_checkbox.setChecked(self.overlay_renderer.scalebar_enabled)
-        self.scalebar_length_spinbox.setValue(float(self.overlay_renderer.scalebar_length_value))
-        self.unit_combo.setCurrentText(self.overlay_renderer.scalebar_unit)
-        self.scalebar_thickness_spinbox.setValue(int(self.overlay_renderer.scalebar_thickness))
-        self.position_combo.setCurrentText(self.overlay_renderer.scalebar_position)
-        self.bg_checkbox.setChecked(self.overlay_renderer.scalebar_bg_enabled)
-        self.bg_opacity_slider.setValue(int(self.overlay_renderer.scalebar_bg_opacity))
-        set_color_button_indicator(self.bar_color_btn, self.overlay_renderer.bar_color)
-        set_color_button_indicator(self.text_color_btn, self.overlay_renderer.text_color)
-        set_color_button_indicator(self.bg_color_btn, self.overlay_renderer.scalebar_bg_color)
-
-        self.aperture_checkbox.setChecked(self.overlay_renderer.aperture_enabled)
-        self.aperture_size_combo.setCurrentText(str(self.overlay_renderer.aperture_nominal_size))
-        set_color_button_indicator(self.aperture_color_btn, self.overlay_renderer.aperture_color)
-
-        self.measurement_checkbox.setChecked(self.overlay_renderer.measurement_enabled)
-        self.measurement_unit_combo.setCurrentText(self.overlay_renderer.measurement_unit)
-        self.measurement_thickness_spinbox.setValue(int(self.overlay_renderer.measurement_line_width))
-        self.measurement_label_checkbox.setChecked(bool(self.overlay_renderer.measurement_show_label))
-        set_color_button_indicator(self.measurement_line_color_btn, self.overlay_renderer.measurement_line_color)
-        set_color_button_indicator(self.measurement_text_color_btn, self.overlay_renderer.measurement_text_color)
+        self._app_state_manager.apply_overlay_settings_to_controls(self)
 
     def _restore_window_state_from_settings(self):
-        """Restore window geometry and splitter layout from persisted settings."""
-        window = self._app_settings.get("window", {})
-        try:
-            width = max(800, int(window.get("width", 1100)))
-            height = max(600, int(window.get("height", 700)))
-            self.resize(width, height)
-            self.move(int(window.get("x", 100)), int(window.get("y", 100)))
-        except Exception:
-            pass
-
-        splitter_sizes = self._app_settings.get("splitter_sizes", [900, 350])
-        if isinstance(splitter_sizes, list) and len(splitter_sizes) >= 2:
-            try:
-                self.main_splitter.setSizes([max(100, int(splitter_sizes[0])), max(100, int(splitter_sizes[1]))])
-            except Exception:
-                pass
+        self._app_state_manager.restore_window_state_from_settings(self)
 
     def _on_crop_defaults_changed(self, _value=None):
-        """Persist top/bottom crop defaults to presets payload."""
+        """Update in-session top/bottom crop defaults."""
         if not hasattr(self, "crop_top_spinbox") or not hasattr(self, "crop_bottom_spinbox"):
             return
-        PresetStorage.save_crop_defaults(
-            int(self.crop_top_spinbox.value()),
-            int(self.crop_bottom_spinbox.value()),
+
+    def _current_session_preset_payload(self) -> dict:
+        """Build the preset payload represented by the current UI session."""
+        crop_top = int(self.crop_top_spinbox.value()) if hasattr(self, "crop_top_spinbox") else 0
+        crop_bottom = int(self.crop_bottom_spinbox.value()) if hasattr(self, "crop_bottom_spinbox") else 0
+        return PresetStorage.normalize_payload(
+            {
+                "pixel_size_presets": dict(self.presets),
+                "crop_defaults": {
+                    "top_rows": crop_top,
+                    "bottom_rows": crop_bottom,
+                },
+            }
         )
 
+    def _session_presets_dirty(self) -> bool:
+        return self._current_session_preset_payload() != self._session_preset_baseline
+
+    def _confirm_exit_with_preset_changes(self) -> QMessageBox.StandardButton:
+        """Prompt when unsaved session preset changes would be persisted on exit."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Unsaved Preset Changes")
+        box.setText(
+            "Your preset values have changed and will be saved (overwrites the existing presets.json) on exiting TAMIAS."
+        )
+        box.setInformativeText("Do you want to continue with these new preset values?")
+        yes_button = box.addButton("Yes (Save and exit)", QMessageBox.ButtonRole.YesRole)
+        no_button = box.addButton("No (Discard and exit)", QMessageBox.ButtonRole.NoRole)
+        cancel_button = box.addButton("Cancel (Return to TAMIAS)", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(yes_button)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked == yes_button:
+            return QMessageBox.StandardButton.Yes
+        if clicked == no_button:
+            return QMessageBox.StandardButton.No
+        if clicked == cancel_button:
+            return QMessageBox.StandardButton.Cancel
+        return QMessageBox.StandardButton.Cancel
+
     def _collect_app_settings(self) -> dict:
-        """Collect current UI/application state for persistence."""
-        settings = {
-            "theme_mode": self._theme_mode,
-            "window": {
-                "x": int(self.x()),
-                "y": int(self.y()),
-                "width": int(self.width()),
-                "height": int(self.height()),
-            },
-            "splitter_sizes": [int(v) for v in self.main_splitter.sizes()],
-            "single_io_directory": str(self.single_io_directory or ""),
-            "batch_input_directory": str(self.batch_input_directory or ""),
-            "batch_output_directory": str(self.batch_output_directory or ""),
-            "overlay": {
-                "scalebar_enabled": bool(self.overlay_renderer.scalebar_enabled),
-                "scalebar_length_value": float(self.overlay_renderer.scalebar_length_value),
-                "scalebar_unit": str(self.overlay_renderer.scalebar_unit),
-                "scalebar_thickness": int(self.overlay_renderer.scalebar_thickness),
-                "scalebar_position": str(self.overlay_renderer.scalebar_position),
-                "bar_color": self.overlay_renderer.bar_color.name(),
-                "text_color": self.overlay_renderer.text_color.name(),
-                "scalebar_bg_enabled": bool(self.overlay_renderer.scalebar_bg_enabled),
-                "scalebar_bg_color": self.overlay_renderer.scalebar_bg_color.name(),
-                "scalebar_bg_opacity": int(self.overlay_renderer.scalebar_bg_opacity),
-                "aperture_enabled": bool(self.overlay_renderer.aperture_enabled),
-                "aperture_nominal_size": int(self.overlay_renderer.aperture_nominal_size),
-                "aperture_color": self.overlay_renderer.aperture_color.name(),
-                "measurement_enabled": bool(self.overlay_renderer.measurement_enabled),
-                "measurement_unit": str(self.overlay_renderer.measurement_unit),
-                "measurement_line_color": self.overlay_renderer.measurement_line_color.name(),
-                "measurement_text_color": self.overlay_renderer.measurement_text_color.name(),
-                "measurement_show_label": bool(self.overlay_renderer.measurement_show_label),
-                "measurement_line_width": int(self.overlay_renderer.measurement_line_width),
-            },
-        }
-        return settings
+        return self._app_state_manager.collect_app_settings(self)
 
     def _persist_user_state(self):
-        """Persist settings and preset payload to disk."""
-        AppSettingsStorage.save_settings(self._collect_app_settings())
-        PresetStorage.save_presets(self.presets)
-        if hasattr(self, "crop_top_spinbox") and hasattr(self, "crop_bottom_spinbox"):
-            PresetStorage.save_crop_defaults(
-                int(self.crop_top_spinbox.value()),
-                int(self.crop_bottom_spinbox.value()),
-            )
+        self._app_state_manager.persist_user_state(self, persist_presets=False)
 
     def closeEvent(self, event):
-        """Persist user settings when closing the app."""
+        """Persist user settings and handle preset-save confirmation when needed."""
+        save_presets = False
+        if self._session_presets_dirty():
+            answer = self._confirm_exit_with_preset_changes()
+            if answer == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            if answer == QMessageBox.StandardButton.Yes:
+                save_presets = True
+
         self._persist_user_state()
+        if save_presets:
+            PresetStorage.save_preset_payload(self._current_session_preset_payload())
         super().closeEvent(event)
         
     def setup_ui(self):
@@ -741,395 +636,27 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         
     def _setup_preset_controls(self, parent_layout):
         """Setup imaging mode preset controls."""
-        preset_box = QCollapsibleBox("Imaging Mode", expanded=True)
-        preset_layout = QVBoxLayout()
-        
-        self.preset_combo = QComboBox()
-        self._update_preset_combo()
-        self.preset_combo.currentTextChanged.connect(self.on_preset_changed)
-        preset_layout.addWidget(QLabel("Select Preset:"))
-        preset_layout.addWidget(self.preset_combo)
-        
-        # Pixel size input
-        pixel_size_layout = QHBoxLayout()
-        pixel_size_layout.addWidget(QLabel("Pixel size:"))
-        
-        self.pixel_size_spinbox = QDoubleSpinBox()
-        self.pixel_size_spinbox.setRange(0.00001, 100000.0)
-        self.pixel_size_spinbox.setDecimals(3)
-        self.pixel_size_spinbox.setValue(1.0)
-        self.pixel_size_spinbox.valueChanged.connect(self.on_pixel_size_changed)
-        pixel_size_layout.addWidget(self.pixel_size_spinbox)
-        
-        self.pixel_size_unit_combo = QComboBox()
-        self.pixel_size_unit_combo.addItems(["nm", "µm"])
-        self.pixel_size_unit_combo.currentTextChanged.connect(self.on_pixel_size_unit_changed)
-        pixel_size_layout.addWidget(self.pixel_size_unit_combo)
-        
-        preset_layout.addLayout(pixel_size_layout)
-
-        preset_info_label = QLabel(
-            "To change the pixel size of presets, go to Settings > Manage Presets in the main menu."
-        )
-        preset_info_label.setWordWrap(True)
-        preset_info_label.setStyleSheet("font-style: italic")
-        preset_layout.addWidget(preset_info_label)
-        
-        # Set default preset
-        if "Standard" in self.presets:
-            self.preset_combo.setCurrentText("Standard")
-            # Apply preset-specific scalebar defaults for Standard
-            QTimer.singleShot(0, self._apply_initial_scalebar_defaults)
-
-        self._update_pixel_size_editable_state(self.preset_combo.currentText())
-        
-        preset_box.setContentLayout(preset_layout)
-        parent_layout.addWidget(preset_box)
+        ui_sections.setup_preset_controls(self, parent_layout)
         
     def _setup_brightness_contrast_controls(self, parent_layout):
         """Setup brightness/contrast controls."""
-        bc_box = QCollapsibleBox("Brightness/Contrast", expanded=False)
-        bc_layout = QVBoxLayout()
-        
-        auto_btn = QPushButton("Auto Adjust")
-        auto_btn.clicked.connect(self.auto_adjust)
-        bc_layout.addWidget(auto_btn)
-        
-        # Min slider
-        bc_layout.addWidget(QLabel("Min Value:"))
-        min_layout = QHBoxLayout()
-        self.min_slider = QSlider(Qt.Orientation.Horizontal)
-        self.min_slider.setRange(0, 255)
-        self.min_slider.setValue(0)
-        self.min_slider.valueChanged.connect(self.on_brightness_contrast_changed)
-        self.min_value_label = QLabel("0")
-        min_layout.addWidget(self.min_slider)
-        min_layout.addWidget(self.min_value_label)
-        bc_layout.addLayout(min_layout)
-        
-        # Max slider
-        bc_layout.addWidget(QLabel("Max Value:"))
-        max_layout = QHBoxLayout()
-        self.max_slider = QSlider(Qt.Orientation.Horizontal)
-        self.max_slider.setRange(0, 255)
-        self.max_slider.setValue(255)
-        self.max_slider.valueChanged.connect(self.on_brightness_contrast_changed)
-        self.max_value_label = QLabel("255")
-        max_layout.addWidget(self.max_slider)
-        max_layout.addWidget(self.max_value_label)
-        bc_layout.addLayout(max_layout)
-        
-        reset_btn = QPushButton("Reset")
-        reset_btn.clicked.connect(self.reset_brightness_contrast)
-        bc_layout.addWidget(reset_btn)
-        
-        bc_box.setContentLayout(bc_layout)
-        parent_layout.addWidget(bc_box)
+        ui_sections.setup_brightness_contrast_controls(self, parent_layout)
 
     def _setup_transform_controls(self, parent_layout):
         """Setup image transform controls."""
-        transform_box = QCollapsibleBox("Image Transform", expanded=False)
-        transform_layout = QHBoxLayout()
-        
-        flip_h_btn = QPushButton("Flip Horizontal")
-        flip_h_btn.clicked.connect(self.flip_horizontal)
-        transform_layout.addWidget(flip_h_btn)
-        
-        flip_v_btn = QPushButton("Flip Vertical")
-        flip_v_btn.clicked.connect(self.flip_vertical)
-        transform_layout.addWidget(flip_v_btn)
-        
-        transform_box.setContentLayout(transform_layout)
-        parent_layout.addWidget(transform_box)
+        ui_sections.setup_transform_controls(self, parent_layout)
         
     def _setup_scalebar_controls(self, parent_layout):
         """Setup scalebar controls."""
-        scalebar_box = QCollapsibleBox("Scalebar", expanded=False)
-        scalebar_layout = QVBoxLayout()
-        
-        self.scalebar_checkbox = QCheckBox("Show Scalebar")
-        self.scalebar_checkbox.setChecked(True)
-        self.scalebar_checkbox.stateChanged.connect(self.on_scalebar_toggled)
-        scalebar_layout.addWidget(self.scalebar_checkbox)
-
-        self.move_scalebar_btn = QPushButton("☰  Move Scalebar Box")
-        self.move_scalebar_btn.setCheckable(True)
-        self.move_scalebar_btn.setToolTip(
-            "Click and drag on the image to reposition the full scalebar box"
-        )
-        self.move_scalebar_btn.toggled.connect(self.on_scalebar_drag_mode_toggled)
-        scalebar_layout.addWidget(self.move_scalebar_btn)
-        
-        # Length
-        length_layout = QHBoxLayout()
-        length_layout.addWidget(QLabel("Length:"))
-        self.scalebar_length_spinbox = SmartDoubleSpinBox()
-        self.scalebar_length_spinbox.setDecimals(2)
-        self.scalebar_length_spinbox.setSingleStep(0.1)
-        self.scalebar_length_spinbox.setRange(0.01, 10000.0)
-        self.scalebar_length_spinbox.setValue(100.0)
-        self.scalebar_length_spinbox.valueChanged.connect(self.on_scalebar_changed)
-        # Track raw user text to preserve trailing zeros if provided
-        try:
-            self.scalebar_length_spinbox.lineEdit().textEdited.connect(self.on_scalebar_length_text_edited)
-        except Exception:
-            pass
-        length_layout.addWidget(self.scalebar_length_spinbox)
-        
-        self.unit_combo = QComboBox()
-        self.unit_combo.addItems(["nm", "µm"])
-        self.unit_combo.currentTextChanged.connect(self.on_scalebar_unit_changed)
-        length_layout.addWidget(self.unit_combo)
-        scalebar_layout.addLayout(length_layout)
-        
-        # Thickness
-        thickness_layout = QHBoxLayout()
-        thickness_layout.addWidget(QLabel("Thickness (px):"))
-        self.scalebar_thickness_spinbox = QSpinBox()
-        self.scalebar_thickness_spinbox.setRange(5, 100)
-        self.scalebar_thickness_spinbox.setValue(15)
-        self.scalebar_thickness_spinbox.valueChanged.connect(self.on_scalebar_changed)
-        thickness_layout.addWidget(self.scalebar_thickness_spinbox)
-        scalebar_layout.addLayout(thickness_layout)
-        
-        # Position
-        scalebar_layout.addWidget(QLabel("Position:"))
-        self.position_combo = QComboBox()
-        self.position_combo.addItems(["bottom-right", "bottom-left", "top-right", "top-left", "custom"])
-        self.position_combo.currentTextChanged.connect(self.on_scalebar_changed)
-        scalebar_layout.addWidget(self.position_combo)
-        
-        # Bar color
-        bar_color_layout = QHBoxLayout()
-        bar_color_layout.addWidget(QLabel("Bar Color:"))
-        self.bar_color_btn = QPushButton("Choose Color…")
-        self.bar_color_btn.clicked.connect(self.choose_bar_color)
-        set_color_button_indicator(self.bar_color_btn, self.overlay_renderer.bar_color)
-        bar_color_layout.addWidget(self.bar_color_btn)
-        scalebar_layout.addLayout(bar_color_layout)
-        
-        # Text color
-        text_color_layout = QHBoxLayout()
-        text_color_layout.addWidget(QLabel("Text Color:"))
-        self.text_color_btn = QPushButton("Choose Color…")
-        self.text_color_btn.clicked.connect(self.choose_text_color)
-        set_color_button_indicator(self.text_color_btn, self.overlay_renderer.text_color)
-        text_color_layout.addWidget(self.text_color_btn)
-        scalebar_layout.addLayout(text_color_layout)
-        
-        # Font
-        font_layout = QHBoxLayout()
-        self.font_label = QLabel("Font: Arial, 20pt")
-        choose_font_btn = QPushButton("Choose Font…")
-        choose_font_btn.clicked.connect(self.choose_font)
-        font_layout.addWidget(self.font_label)
-        font_layout.addWidget(choose_font_btn)
-        scalebar_layout.addLayout(font_layout)
-        
-        # Background box
-        bg_inner_box = QCollapsibleBox("Background Box", expanded=False)
-        bg_layout = QVBoxLayout()
-        self.bg_checkbox = QCheckBox("Enable background box for legibility")
-        self.bg_checkbox.stateChanged.connect(self.on_bg_toggled)
-        bg_layout.addWidget(self.bg_checkbox)
-        
-        bg_controls_layout = QHBoxLayout()
-        self.bg_color_btn = QPushButton("Choose Color…")
-        self.bg_color_btn.clicked.connect(self.choose_bg_color)
-        set_color_button_indicator(self.bg_color_btn, self.overlay_renderer.scalebar_bg_color)
-        bg_controls_layout.addWidget(self.bg_color_btn)
-        
-        bg_controls_layout.addWidget(QLabel("Opacity:"))
-        self.bg_opacity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.bg_opacity_slider.setRange(0, 255)
-        self.bg_opacity_slider.setValue(255)
-        self.bg_opacity_slider.valueChanged.connect(self.on_bg_opacity_changed)
-        bg_controls_layout.addWidget(self.bg_opacity_slider)
-        
-        bg_layout.addLayout(bg_controls_layout)
-        self.bg_checkbox.setChecked(True)
-        bg_inner_box.setContentLayout(bg_layout)
-        scalebar_layout.addWidget(bg_inner_box)
-        
-        scalebar_box.setContentLayout(scalebar_layout)
-        parent_layout.addWidget(scalebar_box)
+        ui_sections.setup_scalebar_controls(self, parent_layout)
         
     def _setup_aperture_controls(self, parent_layout):
         """Setup aperture overlay controls."""
-        aperture_box = QCollapsibleBox("Aperture Overlay", expanded=False)
-        aperture_layout = QVBoxLayout()
-        
-        self.aperture_checkbox = QCheckBox("Show Aperture")
-        self.aperture_checkbox.setChecked(False)
-        self.aperture_checkbox.stateChanged.connect(self.on_aperture_toggled)
-        aperture_layout.addWidget(self.aperture_checkbox)
-        
-        # Size selector
-        size_layout = QHBoxLayout()
-        size_layout.addWidget(QLabel("Nominal diameter (µm):"))
-        self.aperture_size_combo = QComboBox()
-        self.aperture_size_combo.addItems(["300", "200", "100", "50"])
-        self.aperture_size_combo.setCurrentText("100")
-        self.aperture_size_combo.currentTextChanged.connect(self.on_aperture_size_changed)
-        size_layout.addWidget(self.aperture_size_combo)
-        aperture_layout.addLayout(size_layout)
-        
-        self.aperture_info_label = QLabel("Apparent diameter: 2.0 µm")
-        self.aperture_info_label.setStyleSheet("font-style: italic")
-        aperture_layout.addWidget(self.aperture_info_label)
-        
-        # Color
-        aperture_color_layout = QHBoxLayout()
-        aperture_color_layout.addWidget(QLabel("Circle color:"))
-        self.aperture_color_btn = QPushButton("Choose Color...")
-        self.aperture_color_btn.clicked.connect(self.choose_aperture_color)
-        set_color_button_indicator(self.aperture_color_btn, self.overlay_renderer.aperture_color)
-        aperture_color_layout.addWidget(self.aperture_color_btn)
-        aperture_layout.addLayout(aperture_color_layout)
-        
-        aperture_box.setContentLayout(aperture_layout)
-        parent_layout.addWidget(aperture_box)
+        ui_sections.setup_aperture_controls(self, parent_layout)
 
     def _setup_measurement_controls(self, parent_layout):
         """Setup particle measurement controls."""
-        measurement_box = QCollapsibleBox("Particle Measurement", expanded=False)
-        measurement_layout = QVBoxLayout()
-
-        self.measurement_checkbox = QCheckBox("Show Measurement Annotations")
-        self.measurement_checkbox.setChecked(False)
-        self.measurement_checkbox.stateChanged.connect(self.on_measurement_toggled)
-        measurement_layout.addWidget(self.measurement_checkbox)
-
-        self.measurement_label_checkbox = QCheckBox("Include Length Label")
-        self.measurement_label_checkbox.setChecked(self.overlay_renderer.measurement_show_label)
-        self.measurement_label_checkbox.stateChanged.connect(self.on_measurement_changed)
-        measurement_layout.addWidget(self.measurement_label_checkbox)
-
-        # Draw mode toggle
-        self.draw_measurement_btn = QPushButton("✏  Draw Measurement")
-        self.draw_measurement_btn.setCheckable(True)
-        self.draw_measurement_btn.setToolTip(
-            "Click and drag on the image to draw a measurement line"
-        )
-        self.draw_measurement_btn.toggled.connect(self.on_draw_mode_toggled)
-        measurement_layout.addWidget(self.draw_measurement_btn)
-
-        self.move_label_btn = QPushButton("☰  Move Label")
-        self.move_label_btn.setCheckable(True)
-        self.move_label_btn.setToolTip(
-            "Click and drag a measurement label to reposition it"
-        )
-        self.move_label_btn.toggled.connect(self.on_label_drag_mode_toggled)
-        measurement_layout.addWidget(self.move_label_btn)
-
-        self.move_line_btn = QPushButton("↔  Move Line")
-        self.move_line_btn.setCheckable(True)
-        self.move_line_btn.setToolTip(
-            "Click and drag a measurement line to move the full annotation"
-        )
-        self.move_line_btn.toggled.connect(self.on_line_drag_mode_toggled)
-        measurement_layout.addWidget(self.move_line_btn)
-
-        # Style controls
-        unit_layout = QHBoxLayout()
-        unit_layout.addWidget(QLabel("Length Unit:"))
-        self.measurement_unit_combo = QComboBox()
-        self.measurement_unit_combo.addItems(["nm", "µm"])
-        self.measurement_unit_combo.currentTextChanged.connect(self.on_measurement_changed)
-        unit_layout.addWidget(self.measurement_unit_combo)
-        measurement_layout.addLayout(unit_layout)
-
-        thickness_layout = QHBoxLayout()
-        thickness_layout.addWidget(QLabel("Line Width (px):"))
-        self.measurement_thickness_spinbox = QSpinBox()
-        self.measurement_thickness_spinbox.setRange(1, 20)
-        self.measurement_thickness_spinbox.setValue(self.overlay_renderer.measurement_line_width)
-        self.measurement_thickness_spinbox.valueChanged.connect(self.on_measurement_changed)
-        thickness_layout.addWidget(self.measurement_thickness_spinbox)
-        measurement_layout.addLayout(thickness_layout)
-
-        line_color_layout = QHBoxLayout()
-        line_color_layout.addWidget(QLabel("Line Color:"))
-        self.measurement_line_color_btn = QPushButton("Choose Color...")
-        self.measurement_line_color_btn.clicked.connect(self.choose_measurement_line_color)
-        set_color_button_indicator(self.measurement_line_color_btn, self.overlay_renderer.measurement_line_color)
-        line_color_layout.addWidget(self.measurement_line_color_btn)
-        measurement_layout.addLayout(line_color_layout)
-
-        text_color_layout = QHBoxLayout()
-        text_color_layout.addWidget(QLabel("Text Color:"))
-        self.measurement_text_color_btn = QPushButton("Choose Color...")
-        self.measurement_text_color_btn.clicked.connect(self.choose_measurement_text_color)
-        set_color_button_indicator(self.measurement_text_color_btn, self.overlay_renderer.measurement_text_color)
-        text_color_layout.addWidget(self.measurement_text_color_btn)
-        measurement_layout.addLayout(text_color_layout)
-
-        end_style_layout = QHBoxLayout()
-        end_style_layout.addWidget(QLabel("Start Cap:"))
-        self.measurement_start_end_combo = QComboBox()
-        self.measurement_start_end_combo.addItems(["head", "tick", "dot", "none"])
-        self.measurement_start_end_combo.currentTextChanged.connect(self._on_selected_measurement_end_style_changed)
-        end_style_layout.addWidget(self.measurement_start_end_combo)
-
-        end_style_layout.addWidget(QLabel("End Cap:"))
-        self.measurement_end_end_combo = QComboBox()
-        self.measurement_end_end_combo.addItems(["head", "tick", "dot", "none"])
-        self.measurement_end_end_combo.currentTextChanged.connect(self._on_selected_measurement_end_style_changed)
-        end_style_layout.addWidget(self.measurement_end_end_combo)
-        measurement_layout.addLayout(end_style_layout)
-        
-        # Measurement list
-        measurement_layout.addWidget(QLabel("Measurements:"))
-        self.measurement_table = ClickClearTableWidget()
-        self.measurement_table.setColumnCount(8)
-        self.measurement_table.setHorizontalHeaderLabels([
-            "#", "Length", "Label", "Line", "Text", "Width", "Start", "End"
-        ])
-        self.measurement_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.measurement_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.measurement_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.measurement_table.setMaximumHeight(170)
-        self.measurement_table.currentCellChanged.connect(
-            lambda current_row, _current_col, _prev_row, _prev_col: self._on_measurement_selection_changed(current_row)
-        )
-        self.measurement_table.cellClicked.connect(self._on_measurement_table_cell_clicked)
-        measurement_layout.addWidget(self.measurement_table)
-
-
-        apply_all_btn = QPushButton("Apply Style to All")
-        apply_all_btn.clicked.connect(self.apply_current_measurement_style_to_all)
-        apply_selected_btn = QPushButton("Apply Style to Selected")
-        apply_selected_btn.clicked.connect(self.apply_current_measurement_style_to_selected)
-        apply_btn_layout = QHBoxLayout()
-        apply_btn_layout.addWidget(apply_selected_btn)
-        apply_btn_layout.addWidget(apply_all_btn)
-        measurement_layout.addLayout(apply_btn_layout)
-
-        list_btn_layout = QHBoxLayout()
-        remove_btn = QPushButton("Remove Selected")
-        remove_btn.clicked.connect(self.remove_selected_measurement)
-        list_btn_layout.addWidget(remove_btn)
-        clear_all_btn = QPushButton("Clear All")
-        clear_all_btn.clicked.connect(self.clear_all_measurements)
-        list_btn_layout.addWidget(clear_all_btn)
-        measurement_layout.addLayout(list_btn_layout)
-
-        self.measurement_status_label = QLabel(
-            "Enable 'Show Annotations', then click 'Draw Measurement' and drag on the image."
-        )
-        self.measurement_status_label.setStyleSheet("font-style: italic")
-        self.measurement_status_label.setWordWrap(True)
-        measurement_layout.addWidget(self.measurement_status_label)
-
-        # Start disabled until measurement overlay is enabled.
-        self.draw_measurement_btn.setEnabled(False)
-        self.move_line_btn.setEnabled(False)
-        self.move_label_btn.setEnabled(False)
-        self.measurement_start_end_combo.setEnabled(False)
-        self.measurement_end_end_combo.setEnabled(False)
-
-        measurement_box.setContentLayout(measurement_layout)
-        parent_layout.addWidget(measurement_box)
+        ui_sections.setup_measurement_controls(self, parent_layout)
         
     # Event handlers
     def load_image(self):
@@ -1259,7 +786,6 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             npp = 1.0
         self.nm_per_pixel = npp
         self.presets["Custom"] = npp
-        PresetStorage.save_presets(self.presets)
         self._update_measurement_info_label()
         self.update_display()
     
@@ -1346,6 +872,20 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         if selected_position != "custom":
             self.overlay_renderer.scalebar_position = selected_position
             self.overlay_renderer.scalebar_offset = (0.0, 0.0)
+        # Keep the raw label text synchronized even when value changes come from
+        # spinbox stepping, wheel, or programmatic setValue calls.
+        raw_text = ""
+        try:
+            raw_text = self.scalebar_length_spinbox.lineEdit().text().strip()
+        except Exception:
+            raw_text = ""
+        if not raw_text:
+            try:
+                raw_text = self.scalebar_length_spinbox.cleanText().strip()
+            except Exception:
+                raw_text = ""
+        if raw_text:
+            self.scalebar_length_text_raw = raw_text
         # Preserve label decimals as typed, if available and valid
         override = getattr(self, 'scalebar_length_text_raw', None)
         if isinstance(override, str) and override.strip() != "":
@@ -1493,11 +1033,9 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self.update_display()
 
     def _sync_measurement_end_style_controls_enabled(self):
-        """Enable cap-style controls only when overlay is on and a measurement is selected."""
-        has_selection = len(self._get_selected_measurement_rows()) > 0
-        enabled = self.overlay_renderer.measurement_enabled and has_selection
-        self.measurement_start_end_combo.setEnabled(enabled)
-        self.measurement_end_end_combo.setEnabled(enabled)
+        """Keep cap-style controls available like other global measurement style controls."""
+        self.measurement_start_end_combo.setEnabled(True)
+        self.measurement_end_end_combo.setEnabled(True)
 
     def _on_measurement_selection_changed(self, row: int):
         """Load selected measurement cap styles into the end-style controls."""
@@ -1505,6 +1043,12 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             self.measurement_label_checkbox.blockSignals(True)
             self.measurement_label_checkbox.setChecked(self.overlay_renderer.measurement_show_label)
             self.measurement_label_checkbox.blockSignals(False)
+            self.measurement_start_end_combo.blockSignals(True)
+            self.measurement_end_end_combo.blockSignals(True)
+            self.measurement_start_end_combo.setCurrentText(self.overlay_renderer.measurement_start_cap)
+            self.measurement_end_end_combo.setCurrentText(self.overlay_renderer.measurement_end_cap)
+            self.measurement_start_end_combo.blockSignals(False)
+            self.measurement_end_end_combo.blockSignals(False)
             set_color_button_indicator(self.measurement_line_color_btn, self.overlay_renderer.measurement_line_color)
             set_color_button_indicator(self.measurement_text_color_btn, self.overlay_renderer.measurement_text_color)
             self.move_label_btn.setEnabled(self.overlay_renderer.measurement_enabled and self._has_any_visible_measurement_labels())
@@ -1542,6 +1086,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
     def _on_selected_measurement_end_style_changed(self):
         """Persist end-style changes for the currently selected measurement."""
+        self.overlay_renderer.measurement_start_cap = self.measurement_start_end_combo.currentText()
+        self.overlay_renderer.measurement_end_cap = self.measurement_end_end_combo.currentText()
         selected_rows = self._get_selected_measurement_rows()
         if not selected_rows:
             return
@@ -1697,6 +1243,24 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
     # --- Draw-mode drag handlers ---
 
+    def _on_measurement_section_toggled(self, expanded: bool):
+        """Turn off measurement interaction modes when the section is collapsed."""
+        if expanded:
+            return
+        if self.draw_measurement_btn.isChecked():
+            self.draw_measurement_btn.setChecked(False)
+        if self.move_label_btn.isChecked():
+            self.move_label_btn.setChecked(False)
+        if self.move_line_btn.isChecked():
+            self.move_line_btn.setChecked(False)
+
+    def _on_scalebar_section_toggled(self, expanded: bool):
+        """Turn off scalebar move mode when the section is collapsed."""
+        if expanded:
+            return
+        if self.move_scalebar_btn.isChecked():
+            self.move_scalebar_btn.setChecked(False)
+
     def on_draw_mode_toggled(self, checked: bool):
         """Toggle drag-draw mode on the image label."""
         self._draw_mode_active = checked
@@ -1822,309 +1386,65 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
     def on_draw_press(self, x: int, y: int):
         """Mouse press — either start a new line or grab a label."""
-        if not self.image_processor.has_image():
-            return
-        if self.crop_handle_mouse_press(x, y):
-            return
-        if self._scalebar_drag_active:
-            self._start_scalebar_drag(x, y)
-            return
-        if self._line_drag_active:
-            self._start_line_drag(x, y)
-            return
-        if self._label_drag_active:
-            self._start_label_drag(x, y)
-            return
-        # draw-mode branch
-        mapped = self._map_label_to_image_coords(x, y)
-        if mapped is None:
-            return
-        self._draw_preview_start = mapped
-        self.overlay_renderer.measurement_preview = {"start": mapped, "end": mapped}
-        self.update_display()
+        self._measurement_interaction.on_draw_press(x, y)
 
     def on_draw_move(self, x: int, y: int):
         """Mouse move — update live preview or drag a label."""
-        if self.crop_handle_mouse_move(x, y):
-            return
-        if self._scalebar_drag_active:
-            self._update_scalebar_drag(x, y)
-            return
-        if self._line_drag_active:
-            self._update_line_drag(x, y)
-            return
-        if self._label_drag_active:
-            self._update_label_drag(x, y)
-            return
-        if self._draw_preview_start is None:
-            return
-        mapped = self._map_label_to_image_coords(x, y)
-        if mapped is None:
-            return
-        self.overlay_renderer.measurement_preview = {
-            "start": self._draw_preview_start, "end": mapped
-        }
-        self.update_display()
+        self._measurement_interaction.on_draw_move(x, y)
 
     def on_draw_release(self, x: int, y: int):
         """Mouse release — commit a new line or drop a dragged label."""
-        if self.crop_handle_mouse_release(x, y):
-            return
-        if self._scalebar_drag_active:
-            self._finish_scalebar_drag(x, y)
-            return
-        if self._line_drag_active:
-            self._finish_line_drag(x, y)
-            return
-        if self._label_drag_active:
-            self._finish_label_drag(x, y)
-            return
-        if self._draw_preview_start is None:
-            return
-        mapped = self._map_label_to_image_coords(x, y)
-        if mapped is None:
-            mapped = self._draw_preview_start
-        start = self._draw_preview_start
-        end = mapped
-        self._draw_preview_start = None
-        self.overlay_renderer.measurement_preview = None
-        if np.hypot(float(end[0] - start[0]), float(end[1] - start[1])) > 3:
-            self.overlay_renderer.measurements.append(
-                {
-                    "start": start,
-                    "end": end,
-                    "start_cap": "head",
-                    "end_cap": "head",
-                    "show_label": bool(self.overlay_renderer.measurement_show_label),
-                    "line_color": QColor(self.overlay_renderer.measurement_line_color),
-                    "text_color": QColor(self.overlay_renderer.measurement_text_color),
-                    "line_width": int(self.overlay_renderer.measurement_line_width),
-                }
-            )
-            self._refresh_measurements_list()
-            self.measurement_table.selectRow(len(self.overlay_renderer.measurements) - 1)
-        self.update_display()
+        self._measurement_interaction.on_draw_release(x, y)
 
     # --- Label-drag helpers ---
 
     def _start_scalebar_drag(self, label_x: int, label_y: int):
         """Start dragging the full scalebar box when the click hits its current bounds."""
-        self._scalebar_drag_origin_img = None
-        if not self.overlay_renderer.scalebar_enabled or self._last_rendered_image_size is None:
-            return
-
-        mapped = self._map_label_to_image_coords(label_x, label_y)
-        if mapped is None:
-            return
-        img_x, img_y = float(mapped[0]), float(mapped[1])
-
-        img_w, img_h = self._last_rendered_image_size
-        rect = self.overlay_renderer.get_scalebar_box_rect(img_w, img_h, self.nm_per_pixel)
-        if rect is None:
-            return
-
-        hit_pad = 8.0
-        left, top, right, bottom = rect
-        if not (left - hit_pad <= img_x <= right + hit_pad and top - hit_pad <= img_y <= bottom + hit_pad):
-            self.measurement_status_label.setText("Click on the scalebar box to move it.")
-            return
-
-        self._scalebar_drag_origin_img = (img_x, img_y)
-        self._scalebar_drag_offset_start = tuple(self.overlay_renderer.scalebar_offset)
-        # Mark dropdown as custom when the user starts manual repositioning.
-        if self.position_combo.currentText() != "custom":
-            self.position_combo.blockSignals(True)
-            self.position_combo.setCurrentText("custom")
-            self.position_combo.blockSignals(False)
+        self._measurement_interaction.start_scalebar_drag(label_x, label_y)
 
     def _update_scalebar_drag(self, label_x: int, label_y: int):
         """Update scalebar offset while dragging."""
-        if self._scalebar_drag_origin_img is None:
-            return
-        mapped = self._map_label_to_image_coords(label_x, label_y)
-        if mapped is None:
-            return
-        ddx = float(mapped[0]) - float(self._scalebar_drag_origin_img[0])
-        ddy = float(mapped[1]) - float(self._scalebar_drag_origin_img[1])
-        self.overlay_renderer.scalebar_offset = (
-            float(self._scalebar_drag_offset_start[0]) + ddx,
-            float(self._scalebar_drag_offset_start[1]) + ddy,
-        )
-        self.update_display()
+        self._measurement_interaction.update_scalebar_drag(label_x, label_y)
 
     def _finish_scalebar_drag(self, label_x: int, label_y: int):
         """Commit final scalebar box position."""
-        self._update_scalebar_drag(label_x, label_y)
-        self._scalebar_drag_origin_img = None
+        self._measurement_interaction.finish_scalebar_drag(label_x, label_y)
 
     def _start_line_drag(self, label_x: int, label_y: int):
         """Find the nearest measurement line under cursor and start dragging it."""
-        self._line_drag_index = None
-        if not self.overlay_renderer.measurements:
-            self.measurement_status_label.setText("No measurements available to move.")
-            return
-
-        mapped = self._map_label_to_image_coords(label_x, label_y)
-        if mapped is None:
-            return
-
-        img_w, img_h, scale, offset_x, offset_y = self._get_display_mapping()
-        if scale <= 0:
-            return
-
-        best_idx = None
-        best_dist = 18.0
-        px = float(label_x)
-        py = float(label_y)
-        for idx, m in enumerate(self.overlay_renderer.measurements):
-            sx1 = float(m["start"][0]) * scale + offset_x
-            sy1 = float(m["start"][1]) * scale + offset_y
-            sx2 = float(m["end"][0]) * scale + offset_x
-            sy2 = float(m["end"][1]) * scale + offset_y
-            dist = self._point_to_segment_distance(px, py, sx1, sy1, sx2, sy2)
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = idx
-
-        if best_idx is None:
-            self.measurement_status_label.setText("No line found nearby. Click closer to a measurement line.")
-            return
-
-        self._line_drag_index = best_idx
-        self._line_drag_origin_img = (float(mapped[0]), float(mapped[1]))
-        m = self.overlay_renderer.measurements[best_idx]
-        self._line_drag_start_start = (float(m["start"][0]), float(m["start"][1]))
-        self._line_drag_start_end = (float(m["end"][0]), float(m["end"][1]))
+        self._measurement_interaction.start_line_drag(label_x, label_y)
 
     def _update_line_drag(self, label_x: int, label_y: int):
         """Update selected line position while preserving its shape and label offset."""
-        if self._line_drag_index is None or self._line_drag_origin_img is None:
-            return
-        mapped = self._map_label_to_image_coords(label_x, label_y)
-        if mapped is None or self._last_rendered_image_size is None:
-            return
-
-        ddx = float(mapped[0]) - float(self._line_drag_origin_img[0])
-        ddy = float(mapped[1]) - float(self._line_drag_origin_img[1])
-
-        x1 = self._line_drag_start_start[0] + ddx
-        y1 = self._line_drag_start_start[1] + ddy
-        x2 = self._line_drag_start_end[0] + ddx
-        y2 = self._line_drag_start_end[1] + ddy
-
-        img_w, img_h = self._last_rendered_image_size
-        min_x = min(x1, x2)
-        max_x = max(x1, x2)
-        min_y = min(y1, y2)
-        max_y = max(y1, y2)
-        shift_x = 0.0
-        shift_y = 0.0
-        if min_x < 0:
-            shift_x = -min_x
-        elif max_x > (img_w - 1):
-            shift_x = (img_w - 1) - max_x
-        if min_y < 0:
-            shift_y = -min_y
-        elif max_y > (img_h - 1):
-            shift_y = (img_h - 1) - max_y
-
-        x1 += shift_x
-        y1 += shift_y
-        x2 += shift_x
-        y2 += shift_y
-
-        self.overlay_renderer.measurements[self._line_drag_index]["start"] = (int(round(x1)), int(round(y1)))
-        self.overlay_renderer.measurements[self._line_drag_index]["end"] = (int(round(x2)), int(round(y2)))
-        self._refresh_measurements_list()
-        self.update_display()
+        self._measurement_interaction.update_line_drag(label_x, label_y)
 
     def _finish_line_drag(self, label_x: int, label_y: int):
         """Commit final measurement line position."""
-        self._update_line_drag(label_x, label_y)
-        self._line_drag_index = None
-        self._line_drag_origin_img = None
+        self._measurement_interaction.finish_line_drag(label_x, label_y)
 
     def _start_label_drag(self, label_x: int, label_y: int):
         """Find the nearest label under the cursor and start dragging it."""
-        self._label_drag_index = None
-        if not self.image_processor.has_image() or self._last_rendered_image_size is None:
-            return
-        _img_w, _img_h, scale, offset_x, offset_y = self._get_display_mapping()
-
-        centres = self.overlay_renderer.get_label_centres()
-        hit_radius_screen = 40.0   # pixels in screen space
-        best_dist = hit_radius_screen
-        best_idx = None
-        for i, c in enumerate(centres):
-            if c is None:
-                continue
-            # convert image coords -> screen coords
-            sx = c[0] * scale + offset_x
-            sy = c[1] * scale + offset_y
-            dist = np.hypot(label_x - sx, label_y - sy)
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = i
-
-        if best_idx is None:
-            self.measurement_status_label.setText(
-                "No label found nearby. Click closer to a label."
-            )
-            return
-
-        self._label_drag_index = best_idx
-        mapped = self._map_label_to_image_coords(label_x, label_y)
-        self._label_drag_origin_img = mapped if mapped is not None else (0.0, 0.0)
-        m = self.overlay_renderer.measurements[best_idx]
-        self._label_drag_offset_start = tuple(m.get("label_offset", (0.0, 0.0)))
+        self._measurement_interaction.start_label_drag(label_x, label_y)
 
     def _update_label_drag(self, label_x: int, label_y: int):
         """Update the dragged label's offset as the mouse moves."""
-        if self._label_drag_index is None or self._label_drag_origin_img is None:
-            return
-        mapped = self._map_label_to_image_coords(label_x, label_y)
-        if mapped is None:
-            return
-        ddx = float(mapped[0]) - float(self._label_drag_origin_img[0])
-        ddy = float(mapped[1]) - float(self._label_drag_origin_img[1])
-        new_offset = (
-            float(self._label_drag_offset_start[0]) + ddx,
-            float(self._label_drag_offset_start[1]) + ddy,
-        )
-        self.overlay_renderer.measurements[self._label_drag_index]["label_offset"] = new_offset
-        self.update_display()
+        self._measurement_interaction.update_label_drag(label_x, label_y)
 
     def _finish_label_drag(self, label_x: int, label_y: int):
         """Commit the final label position."""
-        self._update_label_drag(label_x, label_y)
-        self._label_drag_index = None
-        self._label_drag_origin_img = None
+        self._measurement_interaction.finish_label_drag(label_x, label_y)
 
     @staticmethod
     def _point_to_segment_distance(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
         """Return shortest distance from point P to segment AB in screen space."""
-        vx = x2 - x1
-        vy = y2 - y1
-        wx = px - x1
-        wy = py - y1
-        vv = vx * vx + vy * vy
-        if vv <= 1e-12:
-            return float(np.hypot(px - x1, py - y1))
-        t = (wx * vx + wy * vy) / vv
-        t = max(0.0, min(1.0, t))
-        proj_x = x1 + t * vx
-        proj_y = y1 + t * vy
-        return float(np.hypot(px - proj_x, py - proj_y))
+        return point_to_segment_distance(px, py, x1, y1, x2, y2)
 
     def _get_display_mapping(self) -> tuple[int, int, float, float, float]:
         """Return image/display mapping as (img_w, img_h, scale, offset_x, offset_y)."""
         img_w, img_h = self._last_rendered_image_size if self._last_rendered_image_size else (1, 1)
         display_w = max(1, self.image_label.width())
         display_h = max(1, self.image_label.height())
-        scale = min(display_w / img_w, display_h / img_h)
-        offset_x = (display_w - img_w * scale) / 2.0
-        offset_y = (display_h - img_h * scale) / 2.0
-        return img_w, img_h, scale, offset_x, offset_y
+        return compute_display_mapping(img_w, img_h, display_w, display_h)
 
     def remove_selected_measurement(self):
         """Remove the selected measurement from the list."""
@@ -2219,28 +1539,10 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             return None
 
         img_w, img_h = self._last_rendered_image_size
-        if img_w <= 0 or img_h <= 0:
-            return None
-
         display_w = max(1, self.image_label.width())
         display_h = max(1, self.image_label.height())
-
-        scale = min(display_w / img_w, display_h / img_h)
-        scaled_w = img_w * scale
-        scaled_h = img_h * scale
-        offset_x = (display_w - scaled_w) / 2.0
-        offset_y = (display_h - scaled_h) / 2.0
-
-        if label_x < offset_x or label_y < offset_y:
-            return None
-        if label_x > offset_x + scaled_w or label_y > offset_y + scaled_h:
-            return None
-
-        img_x = int(round((label_x - offset_x) / scale))
-        img_y = int(round((label_y - offset_y) / scale))
-        img_x = max(0, min(img_w - 1, img_x))
-        img_y = max(0, min(img_h - 1, img_y))
-        return (img_x, img_y)
+        mapped = map_label_to_image_coords(label_x, label_y, img_w, img_h, display_w, display_h)
+        return mapped
 
     def _update_measurement_info_label(self):
         """Refresh the measurement list (kept for compatibility with existing call sites)."""
@@ -2337,21 +1639,26 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     
     def manage_presets(self):
         """Open preset manager dialog."""
+        crop_defaults = {
+            "top_rows": int(self.crop_top_spinbox.value()) if hasattr(self, "crop_top_spinbox") else 0,
+            "bottom_rows": int(self.crop_bottom_spinbox.value()) if hasattr(self, "crop_bottom_spinbox") else 0,
+        }
         dialog = PresetManager(
             self.presets,
             self,
             preset_file=PresetStorage.get_preset_file(),
-            crop_defaults=PresetStorage.load_crop_defaults(),
+            crop_defaults=crop_defaults,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.presets = dialog.get_presets()
-            PresetStorage.save_presets(self.presets)
             self._update_preset_combo()
     
     def _update_preset_combo(self):
         """Update preset combo box."""
+        default_payload = PresetStorage.get_default_payload()
+        default_custom_value = float(default_payload.get("pixel_size_presets", {}).get("Custom", 1.0))
         if "Custom" not in self.presets:
-            self.presets["Custom"] = 1.0
+            self.presets["Custom"] = default_custom_value
         current = self.preset_combo.currentText() if self.preset_combo.count() > 0 else None
         self.preset_combo.clear()
         self.preset_combo.addItems(sorted(self.presets.keys()))

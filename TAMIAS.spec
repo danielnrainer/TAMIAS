@@ -15,7 +15,8 @@ a = Analysis(
     binaries=[],
     datas=[
         # Include data files as (source, dest) tuples
-        ('pixelsize_presets.json', '.'),
+        ('presets_defaults.json', '.'),
+        ('settings_defaults.json', '.'),
         ('tamias.ico', '.'),
         ('tamias.png', '.'),
         # Include all module directories
@@ -30,10 +31,15 @@ a = Analysis(
         'core.image_processor',
         'core.crop_geometry',
         'core.overlay_renderer',
+        'gui.app_state_manager',
         'gui.batch_processing_dialog',
         'gui.collapsible_box',
+        'gui.custom_widgets',
         'gui.crop_controller',
         'gui.crop_dialog',
+        'gui.measurement_interaction',
+        'gui.theme_manager',
+        'gui.ui_sections',
         'utils.app_settings_manager',
         'utils.preset_manager',
         'utils.storage_paths',

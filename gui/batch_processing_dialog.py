@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QColor, QImage, QIcon, QPixmap
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -33,27 +33,7 @@ from PyQt6.QtWidgets import (
 from core.image_processor import ImageProcessor
 from core.overlay_renderer import OverlayRenderer
 from gui.collapsible_box import QCollapsibleBox
-
-
-class SmartDoubleSpinBox(QDoubleSpinBox):
-    """QDoubleSpinBox that hides trailing zero decimals when possible."""
-
-    def textFromValue(self, value: float) -> str:  # type: ignore[override]
-        try:
-            if abs(value - round(value)) < 1e-9:
-                return str(int(round(value)))
-            return (f"{value:.2f}").rstrip("0").rstrip(".")
-        except Exception:
-            return super().textFromValue(value)
-
-
-def set_color_button_indicator(button: QPushButton, color: QColor):
-    """Show a small color swatch icon on color-picker buttons."""
-    swatch_size = 14
-    pixmap = QPixmap(swatch_size, swatch_size)
-    pixmap.fill(QColor(color))
-    button.setIcon(QIcon(pixmap))
-    button.setIconSize(QSize(swatch_size, swatch_size))
+from gui.custom_widgets import SmartDoubleSpinBox, set_color_button_indicator
 
 
 class BatchProcessingDialog(QDialog):

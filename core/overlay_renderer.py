@@ -44,6 +44,8 @@ class OverlayRenderer:
         self.measurement_text_color = QColor(0, 255, 0)
         self.measurement_show_label = True
         self.measurement_line_width = 4
+        self.measurement_start_cap = "head"
+        self.measurement_end_cap = "head"
         self.measurement_font = QFont("Arial", 16, QFont.Weight.Bold)
     
     def render_image_with_overlays(self, 
@@ -181,21 +183,20 @@ class OverlayRenderer:
         
         desired_px = int(round(length_nm / nm_per_pixel))
         
-        # Cap scalebar length to fit within margins
-        margin = 30
-        max_px = max(1, width - 2 * margin)
+        # Keep preset anchors close to image borders while preserving room to draw.
+        anchor_margin = 15
+        max_px = max(1, width - 2 * anchor_margin)
         scalebar_length_px = min(desired_px, max_px)
         
         # Determine position
         if "bottom" in self.scalebar_position:
-            y = height - margin - self.scalebar_thickness
+            y = height - anchor_margin - self.scalebar_thickness
         else:
-            y = margin
+            y = anchor_margin
         
-        if "right" in self.scalebar_position:
-            x = width - margin - scalebar_length_px
-        else:
-            x = margin
+        # Horizontal anchor is resolved after text metrics are known so we can
+        # keep a consistent border distance for the wider of (bar, label).
+        x = 0
         
         # Build label
         if self.scalebar_label_override is not None and str(self.scalebar_label_override).strip() != "":
@@ -225,41 +226,66 @@ class OverlayRenderer:
         except Exception:
             painter.setFont(QFont("Arial", 20))
         fm = painter.fontMetrics()
-        text_width = fm.horizontalAdvance(label)
-        ascent = fm.ascent()
-        descent = fm.descent()
+        text_advance = fm.horizontalAdvance(label)
+        # Use tight bounds so layout remains stable across different fonts.
+        tight = fm.tightBoundingRect(label)
+        text_left_bearing = float(tight.x())
+        text_top_offset = float(tight.y())
+        text_width = float(tight.width())
+        text_height = float(tight.height())
+        text_bottom_offset = text_top_offset + text_height
         painter.end()
 
         # Text position
-        text_bar_gap = 12  # gap between bar and text
+        text_bar_gap = max(8.0, float(self.scalebar_thickness) * 0.8)
+        box_padding = max(6.0, text_bar_gap * 0.6)
+        bar_top = float(y)
+        bar_bottom = float(y + self.scalebar_thickness)
         if "bottom" in self.scalebar_position:
-            text_baseline_y = y - text_bar_gap
-            text_top = text_baseline_y - ascent
-            text_bottom = text_baseline_y + descent
+            # Keep the text block above the bar with a fixed gap.
+            text_baseline_y = bar_top - text_bar_gap - text_bottom_offset
         else:
-            text_baseline_y = y + self.scalebar_thickness + ascent + text_bar_gap
-            text_top = y + self.scalebar_thickness + text_bar_gap
-            text_bottom = text_baseline_y + descent
-        
-        # Center label horizontally over the bar
-        text_x = x + (scalebar_length_px - text_width) // 2
-        text_x = max(0, min(text_x, width - text_width))
+            # Keep the text block below the bar with a fixed gap.
+            text_baseline_y = bar_bottom + text_bar_gap - text_top_offset
 
-        # Union box around bar + label (used for optional background and drag hitbox)
-        pad = text_bar_gap / 2
-        rect_left = min(x, text_x) - pad
-        rect_right = max(x + scalebar_length_px, text_x + text_width) + pad
-        rect_top = min(y, text_top)
-        rect_bottom = max(y + self.scalebar_thickness, text_bottom) + pad
+        text_top = text_baseline_y + text_top_offset
+        text_bottom = text_baseline_y + text_bottom_offset
+
+        # Resolve horizontal anchor based on the full content span (bar + label),
+        # so defaults stay consistently padded even when text is wider than bar.
+        left_rel = min(
+            0.0,
+            (float(scalebar_length_px) - float(text_advance)) / 2.0 + text_left_bearing,
+        )
+        right_rel = max(
+            float(scalebar_length_px),
+            (float(scalebar_length_px) - float(text_advance)) / 2.0 + text_left_bearing + text_width,
+        )
+        if "right" in self.scalebar_position:
+            x = int(round((float(width) - float(anchor_margin) - box_padding) - right_rel))
+        else:
+            x = int(round((float(anchor_margin) + box_padding) - left_rel))
+
+        # Center label over bar using the final bar anchor.
+        text_x = float(x) + (float(scalebar_length_px) - float(text_advance)) / 2.0
+
+        text_left = text_x + text_left_bearing
+        text_right = text_left + text_width
+
+        # Union box around bar + label (used for optional background and drag hitbox).
+        rect_left = min(float(x), text_left) - box_padding
+        rect_right = max(float(x + scalebar_length_px), text_right) + box_padding
+        rect_top = min(bar_top, text_top) - box_padding
+        rect_bottom = max(bar_bottom, text_bottom) + box_padding
 
         # Apply user drag offset and keep the whole box inside the image bounds.
         offset_x = float(self.scalebar_offset[0])
         offset_y = float(self.scalebar_offset[1])
 
-        x = int(round(x + offset_x))
-        y = int(round(y + offset_y))
-        text_x = int(round(text_x + offset_x))
-        text_baseline_y = int(round(text_baseline_y + offset_y))
+        x = int(round(float(x) + offset_x))
+        y = int(round(float(y) + offset_y))
+        text_x = float(text_x + offset_x)
+        text_baseline_y = float(text_baseline_y + offset_y)
         rect_left = float(rect_left + offset_x)
         rect_right = float(rect_right + offset_x)
         rect_top = float(rect_top + offset_y)
@@ -279,8 +305,8 @@ class OverlayRenderer:
 
         x = int(round(x + shift_x))
         y = int(round(y + shift_y))
-        text_x = int(round(text_x + shift_x))
-        text_baseline_y = int(round(text_baseline_y + shift_y))
+        text_x = float(text_x + shift_x)
+        text_baseline_y = float(text_baseline_y + shift_y)
         rect_left += shift_x
         rect_right += shift_x
         rect_top += shift_y
@@ -290,8 +316,8 @@ class OverlayRenderer:
             "bar_x": x,
             "bar_y": y,
             "bar_length_px": int(scalebar_length_px),
-            "text_x": int(text_x),
-            "text_baseline_y": int(text_baseline_y),
+            "text_x": int(round(text_x)),
+            "text_baseline_y": int(round(text_baseline_y)),
             "label": label,
             "box_left": float(max(0.0, rect_left)),
             "box_top": float(max(0.0, rect_top)),

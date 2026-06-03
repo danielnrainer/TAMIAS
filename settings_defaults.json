@@ -1,0 +1,39 @@
+{
+  "theme_mode": "auto",
+  "window": {
+    "x": 100,
+    "y": 100,
+    "width": 1100,
+    "height": 700
+  },
+  "splitter_sizes": [
+    900,
+    350
+  ],
+  "single_io_directory": "",
+  "batch_input_directory": "",
+  "batch_output_directory": "",
+  "overlay": {
+    "scalebar_enabled": true,
+    "scalebar_length_value": 1,
+    "scalebar_unit": "μm",
+    "scalebar_thickness": 15,
+    "scalebar_position": "bottom-right",
+    "bar_color": "#FFFFFF",
+    "text_color": "#FFFFFF",
+    "scalebar_bg_enabled": true,
+    "scalebar_bg_color": "#000000",
+    "scalebar_bg_opacity": 255,
+    "aperture_enabled": false,
+    "aperture_nominal_size": 100,
+    "aperture_color": "#FFFF00",
+    "measurement_enabled": true,
+    "measurement_unit": "nm",
+    "measurement_line_color": "#0000FF",
+    "measurement_text_color": "#0000FF",
+    "measurement_show_label": true,
+    "measurement_line_width": 3,
+    "measurement_start_cap": "head",
+    "measurement_end_cap": "head"
+  }
+}

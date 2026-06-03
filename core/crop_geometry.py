@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Optional, Tuple
+
+import numpy as np
 
 Rect = Tuple[int, int, int, int]  # inclusive: x1, y1, x2, y2
 Point = Tuple[int, int]
@@ -156,3 +158,78 @@ def center_rect(rect: Rect, img_w: int, img_h: int) -> Rect:
         max(0, min(img_w - 1, x2)),
         max(0, min(img_h - 1, y2)),
     )
+
+
+def compute_display_mapping(
+    img_w: int,
+    img_h: int,
+    display_w: int,
+    display_h: int,
+) -> Tuple[int, int, float, float, float]:
+    """Return mapping as (img_w, img_h, scale, offset_x, offset_y)."""
+    safe_img_w = max(1, int(img_w))
+    safe_img_h = max(1, int(img_h))
+    safe_display_w = max(1, int(display_w))
+    safe_display_h = max(1, int(display_h))
+    scale = min(safe_display_w / safe_img_w, safe_display_h / safe_img_h)
+    offset_x = (safe_display_w - safe_img_w * scale) / 2.0
+    offset_y = (safe_display_h - safe_img_h * scale) / 2.0
+    return safe_img_w, safe_img_h, scale, offset_x, offset_y
+
+
+def map_label_to_image_coords(
+    label_x: int,
+    label_y: int,
+    img_w: int,
+    img_h: int,
+    display_w: int,
+    display_h: int,
+) -> Optional[Point]:
+    """Map coordinates from QLabel display space to source image pixels."""
+    safe_img_w = int(img_w)
+    safe_img_h = int(img_h)
+    if safe_img_w <= 0 or safe_img_h <= 0:
+        return None
+
+    _img_w, _img_h, scale, offset_x, offset_y = compute_display_mapping(
+        safe_img_w,
+        safe_img_h,
+        display_w,
+        display_h,
+    )
+    scaled_w = safe_img_w * scale
+    scaled_h = safe_img_h * scale
+
+    if label_x < offset_x or label_y < offset_y:
+        return None
+    if label_x > offset_x + scaled_w or label_y > offset_y + scaled_h:
+        return None
+
+    img_x = int(round((label_x - offset_x) / scale))
+    img_y = int(round((label_y - offset_y) / scale))
+    img_x = max(0, min(safe_img_w - 1, img_x))
+    img_y = max(0, min(safe_img_h - 1, img_y))
+    return (img_x, img_y)
+
+
+def point_to_segment_distance(
+    px: float,
+    py: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+) -> float:
+    """Return shortest distance from point P to segment AB in screen space."""
+    vx = x2 - x1
+    vy = y2 - y1
+    wx = px - x1
+    wy = py - y1
+    vv = vx * vx + vy * vy
+    if vv <= 1e-12:
+        return float(np.hypot(px - x1, py - y1))
+    t = (wx * vx + wy * vy) / vv
+    t = max(0.0, min(1.0, t))
+    proj_x = x1 + t * vx
+    proj_y = y1 + t * vy
+    return float(np.hypot(px - proj_x, py - proj_y))

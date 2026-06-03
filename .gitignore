@@ -41,3 +41,5 @@ desktop.ini
 *.bak
 *.backup
 *_old.py
+
+.github/

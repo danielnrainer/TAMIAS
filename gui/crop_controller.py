@@ -59,7 +59,7 @@ class CropControllerMixin:
         rows_layout.addWidget(QLabel("Bottom rows:"))
         self.crop_bottom_spinbox = QSpinBox()
         self.crop_bottom_spinbox.setRange(0, 100000)
-        self.crop_bottom_spinbox.setValue(9)
+        self.crop_bottom_spinbox.setValue(10)
         rows_layout.addWidget(self.crop_bottom_spinbox)
         crop_layout.addLayout(rows_layout)
 
@@ -103,6 +103,11 @@ class CropControllerMixin:
         self.manual_crop_move_btn.toggled.connect(self.on_manual_crop_move_mode_toggled)
         crop_layout.addWidget(self.manual_crop_move_btn)
 
+        self.clear_manual_crop_btn = QPushButton("Clear Manual Crop Region")
+        self.clear_manual_crop_btn.clicked.connect(self.clear_manual_crop_selection)
+        self.clear_manual_crop_btn.setEnabled(False)
+        crop_layout.addWidget(self.clear_manual_crop_btn)
+
         self.apply_manual_crop_btn = QPushButton("Apply Manual Crop")
         self.apply_manual_crop_btn.clicked.connect(self.apply_manual_crop)
         crop_layout.addWidget(self.apply_manual_crop_btn)
@@ -110,7 +115,17 @@ class CropControllerMixin:
         self.on_manual_crop_constraint_changed(self.manual_crop_constraint_combo.currentText())
 
         crop_box.setContentLayout(crop_layout)
+        crop_box.toggleButton.toggled.connect(self._on_crop_section_toggled)
         parent_layout.addWidget(crop_box)
+
+    def _on_crop_section_toggled(self, expanded: bool):
+        """Turn off crop interaction modes when the crop section is collapsed."""
+        if expanded:
+            return
+        if hasattr(self, "manual_crop_select_btn") and self.manual_crop_select_btn.isChecked():
+            self.manual_crop_select_btn.setChecked(False)
+        if hasattr(self, "manual_crop_move_btn") and self.manual_crop_move_btn.isChecked():
+            self.manual_crop_move_btn.setChecked(False)
 
     def is_crop_draw_active(self) -> bool:
         return bool(self._manual_crop_mode_active)
@@ -119,7 +134,18 @@ class CropControllerMixin:
         return bool(self._manual_crop_move_mode_active)
 
     def has_manual_crop_selection(self) -> bool:
-        return self._manual_crop_start is not None and self._manual_crop_end is not None
+        if self._manual_crop_start is None or self._manual_crop_end is None:
+            return False
+        return self._is_manual_crop_selection_large_enough()
+
+    def _is_manual_crop_selection_large_enough(self) -> bool:
+        rect = normalize_rect(self._manual_crop_start, self._manual_crop_end)
+        width, height = rect_size(rect)
+        return (width * height) > 4
+
+    def _update_manual_crop_clear_button_state(self):
+        if hasattr(self, "clear_manual_crop_btn"):
+            self.clear_manual_crop_btn.setEnabled(self.has_manual_crop_selection())
 
     def crop_overlay_rect(self) -> Optional[tuple[int, int, int, int]]:
         if not self.has_manual_crop_selection():
@@ -158,6 +184,23 @@ class CropControllerMixin:
             self.manual_crop_move_btn.blockSignals(True)
             self.manual_crop_move_btn.setChecked(False)
             self.manual_crop_move_btn.blockSignals(False)
+        self._update_manual_crop_clear_button_state()
+
+    def clear_manual_crop_selection(self):
+        """Clear currently selected manual crop rectangle."""
+        had_selection = self._manual_crop_start is not None and self._manual_crop_end is not None
+        self._manual_crop_start = None
+        self._manual_crop_end = None
+        self._manual_crop_drag_active = False
+        self._manual_crop_drag_origin_img = None
+        self._manual_crop_drag_start_start = None
+        self._manual_crop_drag_start_end = None
+        self._update_manual_crop_clear_button_state()
+        self.update_display()
+        if had_selection:
+            self.measurement_status_label.setText("Manual crop selection cleared.")
+        else:
+            self.measurement_status_label.setText("No manual crop selection to clear.")
 
     def crop_handle_mouse_press(self, x: int, y: int) -> bool:
         if self.is_crop_move_active():
@@ -180,6 +223,7 @@ class CropControllerMixin:
                 return True
             self._manual_crop_start = mapped
             self._manual_crop_end = mapped
+            self._update_manual_crop_clear_button_state()
             self.update_display()
             return True
 
@@ -205,6 +249,7 @@ class CropControllerMixin:
             self._manual_crop_end = self._constrain_manual_crop_endpoint(self._manual_crop_start, mapped)
             if self.manual_crop_center_checkbox.isChecked():
                 self._center_manual_crop_selection()
+            self._update_manual_crop_clear_button_state()
             self.update_display()
             return True
 
@@ -231,6 +276,13 @@ class CropControllerMixin:
                 self._manual_crop_end = self._constrain_manual_crop_endpoint(self._manual_crop_start, mapped)
                 if self.manual_crop_center_checkbox.isChecked():
                     self._center_manual_crop_selection()
+            if not self.has_manual_crop_selection():
+                self.clear_manual_crop_selection()
+                self.measurement_status_label.setText(
+                    "Manual crop selection cleared. Selected area must be larger than 4 px."
+                )
+            else:
+                self._update_manual_crop_clear_button_state()
             self.update_display()
             return True
 
@@ -430,7 +482,7 @@ class CropControllerMixin:
 
         x1, y1, x2, y2 = rect
         crop_width, crop_height = rect_size(rect)
-        if crop_width <= 1 or crop_height <= 1:
+        if (crop_width * crop_height) <= 4:
             QMessageBox.warning(self, "Manual Crop", "Selected region is too small to crop.")
             return
 
@@ -465,6 +517,7 @@ class CropControllerMixin:
 
         self._manual_crop_start = None
         self._manual_crop_end = None
+        self._update_manual_crop_clear_button_state()
         self._reset_image_specific_overlays(disable_scalebar=False)
         self._last_rendered_image_size = None
         self._refresh_scale_information()

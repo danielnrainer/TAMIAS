@@ -5,29 +5,35 @@ Handles preset storage, loading, and the preset management dialog.
 
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QDialogButtonBox, QFileDialog, QMessageBox, QLabel
 )
 
-from utils.storage_paths import ensure_app_storage_dir
+from utils.storage_paths import ensure_app_storage_dir, get_project_resource_path
 
 
-DEFAULT_PIXEL_PRESETS = {
-    "Standard": 35.6,
-    "Local Map": 80.5,
-    "Reference": 16.0,
-    "In focus": 32.9,
-    "High Res": 5.3,
-    "Custom": 1.0,
-}
+def _load_shipped_default_payload() -> dict[str, Any]:
+    """Load shipped preset defaults from repository/bundle resource JSON."""
+    fallback = {
+        "pixel_size_presets": {},
+        "crop_defaults": {},
+    }
+    defaults_file = get_project_resource_path("presets_defaults.json")
+    try:
+        with open(defaults_file, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            raise ValueError("Expected JSON object at root")
+        return loaded
+    except Exception as e:
+        print(f"Error loading shipped preset defaults from {defaults_file}: {e}")
+        return fallback
 
-DEFAULT_CROP_DEFAULTS = {
-    "top_rows": 10,
-    "bottom_rows": 9,
-}
+
+_SHIPPED_PRESET_DEFAULTS = _load_shipped_default_payload()
 
 
 class PresetManager(QDialog):
@@ -106,9 +112,10 @@ class PresetManager(QDialog):
         }
 
     def _reload_from_payload(self, payload: dict, file_path: Path | None = None):
+        default_custom_value = float(PresetStorage.get_default_payload().get("pixel_size_presets", {}).get("Custom", 1.0))
         presets = PresetStorage._extract_pixel_presets(payload.get("pixel_size_presets", {}))
         if "Custom" not in presets:
-            presets["Custom"] = 1.0
+            presets["Custom"] = default_custom_value
         self.presets = presets
         self.crop_defaults = PresetStorage._normalize_crop_defaults(payload.get("crop_defaults", {}))
         if file_path is not None:
@@ -203,24 +210,39 @@ class PresetManager(QDialog):
 
     def accept(self):
         self.presets = self.get_presets()
-        if self.save_to_current_file():
-            super().accept()
+        super().accept()
 
 
 class PresetStorage:
     """Handles loading and saving presets to disk."""
 
     @staticmethod
-    def _legacy_preset_files() -> list[Path]:
-        project_root = Path(__file__).resolve().parent.parent
-        return [
-            Path(__file__).resolve().parent / "tem_presets.json",
-            project_root / "pixelsize_presets.json",
-        ]
+    def normalize_payload(payload: dict | None) -> dict:
+        """Return payload in canonical shape and value ranges."""
+        source = payload or {}
+        data = PresetStorage.get_default_payload()
+        data["pixel_size_presets"].update(
+            PresetStorage._extract_pixel_presets(source.get("pixel_size_presets", {}))
+        )
+        data["crop_defaults"] = PresetStorage._normalize_crop_defaults(source.get("crop_defaults", {}))
+        return data
+
+    @staticmethod
+    def get_default_payload() -> dict:
+        """Return a copy of the shipped default preset payload."""
+        payload = _SHIPPED_PRESET_DEFAULTS if isinstance(_SHIPPED_PRESET_DEFAULTS, dict) else {}
+        return {
+            "pixel_size_presets": dict(payload.get("pixel_size_presets", {})),
+            "crop_defaults": dict(payload.get("crop_defaults", {})),
+        }
 
     @staticmethod
     def _normalize_crop_defaults(raw: object) -> dict:
-        crop = dict(DEFAULT_CROP_DEFAULTS)
+        default_crop = PresetStorage.get_default_payload().get("crop_defaults", {})
+        crop = {
+            "top_rows": max(0, int(default_crop.get("top_rows", 0))),
+            "bottom_rows": max(0, int(default_crop.get("bottom_rows", 0))),
+        }
         if isinstance(raw, dict):
             for key in ("top_rows", "bottom_rows"):
                 value = raw.get(key)
@@ -253,10 +275,7 @@ class PresetStorage:
     @staticmethod
     def load_preset_payload_from_file(file_path: Path) -> dict:
         """Load preset payload from an arbitrary JSON file path."""
-        payload = {
-            "pixel_size_presets": dict(DEFAULT_PIXEL_PRESETS),
-            "crop_defaults": dict(DEFAULT_CROP_DEFAULTS),
-        }
+        payload = PresetStorage.get_default_payload()
 
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -270,7 +289,7 @@ class PresetStorage:
         else:
             # Backward-compatible format: plain dict of preset_name -> nm_per_pixel
             pixel_presets = PresetStorage._extract_pixel_presets(loaded_raw)
-            crop_defaults = dict(DEFAULT_CROP_DEFAULTS)
+            crop_defaults = PresetStorage._normalize_crop_defaults({})
 
         payload["pixel_size_presets"].update(pixel_presets)
         payload["crop_defaults"] = crop_defaults
@@ -279,27 +298,16 @@ class PresetStorage:
     @staticmethod
     def load_preset_payload() -> dict:
         """Load full preset payload including crop defaults."""
-        payload = {
-            "pixel_size_presets": dict(DEFAULT_PIXEL_PRESETS),
-            "crop_defaults": dict(DEFAULT_CROP_DEFAULTS),
-        }
+        payload = PresetStorage.get_default_payload()
 
         preset_file = PresetStorage.get_preset_file()
-        candidate_files: list[Path] = [preset_file]
         if not preset_file.exists():
-            candidate_files.extend(PresetStorage._legacy_preset_files())
+            return payload
 
-        loaded_raw = None
-        for candidate in candidate_files:
-            if not candidate.exists():
-                continue
-            try:
-                loaded_raw = PresetStorage.load_preset_payload_from_file(candidate)
-                break
-            except Exception as e:
-                print(f"Error loading presets from {candidate}: {e}")
-
-        if loaded_raw is None:
+        try:
+            loaded_raw = PresetStorage.load_preset_payload_from_file(preset_file)
+        except Exception as e:
+            print(f"Error loading presets from {preset_file}: {e}")
             return payload
 
         payload["pixel_size_presets"].update(
@@ -324,14 +332,7 @@ class PresetStorage:
     @staticmethod
     def save_preset_payload_to_file(payload: dict, file_path: Path) -> None:
         """Save full preset payload to an explicit file path."""
-        data = {
-            "pixel_size_presets": dict(DEFAULT_PIXEL_PRESETS),
-            "crop_defaults": dict(DEFAULT_CROP_DEFAULTS),
-        }
-        data["pixel_size_presets"].update(
-            PresetStorage._extract_pixel_presets(payload.get("pixel_size_presets", {}))
-        )
-        data["crop_defaults"] = PresetStorage._normalize_crop_defaults(payload.get("crop_defaults", {}))
+        data = PresetStorage.normalize_payload(payload)
         try:
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
@@ -343,7 +344,7 @@ class PresetStorage:
     def load_presets() -> Dict[str, float]:
         """Load presets from JSON file."""
         payload = PresetStorage.load_preset_payload()
-        presets = dict(DEFAULT_PIXEL_PRESETS)
+        presets = dict(PresetStorage.get_default_payload().get("pixel_size_presets", {}))
         presets.update(PresetStorage._extract_pixel_presets(payload.get("pixel_size_presets", {})))
         return presets
     
@@ -369,3 +370,10 @@ class PresetStorage:
             "bottom_rows": max(0, int(bottom_rows)),
         }
         PresetStorage.save_preset_payload(payload)
+
+    @staticmethod
+    def reset_to_defaults() -> dict:
+        """Reset persisted presets/crop defaults to shipped values and return payload."""
+        payload = PresetStorage.get_default_payload()
+        PresetStorage.save_preset_payload(payload)
+        return payload

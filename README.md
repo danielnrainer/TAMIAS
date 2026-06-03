@@ -88,8 +88,17 @@ You can access these from the application via `Settings`:
 - `Manage Presets...`
 - `Load Presets from File...`
 - `Save Presets to File...`
+- `Restore Presets to TAMIAS Defaults`
+- `Restore App Settings to TAMIAS Defaults`
 - `Select Theme`
 - `Open Settings Folder`
+
+Shipped defaults are defined in repository JSON resources:
+
+- `presets_defaults.json` for preset/crop defaults
+- `settings_defaults.json` for app settings defaults
+
+At runtime, user-specific files in `%APPDATA%/TAMIAS` override these shipped defaults.
 
 **Basic Workflow:**
 1. Load an image (Ctrl+O)
@@ -119,10 +128,15 @@ TAMIAS/
 │   ├── image_processor.py     # Image loading and adjustments
 │   └── overlay_renderer.py    # Scalebar, aperture and measurement rendering
 ├── gui/                       # GUI components
+│   ├── app_state_manager.py   # Main-window UI state orchestration
 │   ├── batch_processing_dialog.py # Batch processing dialog
 │   ├── collapsible_box.py     # Collapsible section widget
+│   ├── custom_widgets.py      # Shared custom widgets and UI helpers
 │   ├── crop_controller.py     # Crop interaction/controller mixin
-│   └── crop_dialog.py         # Top/bottom crop dialog
+│   ├── crop_dialog.py         # Top/bottom crop dialog
+│   ├── measurement_interaction.py # Measurement draw/drag interaction controller
+│   ├── theme_manager.py       # Theme application and OS sync
+│   └── ui_sections.py         # Extracted setup-section builders for main UI
 ├── utils/                     # Utility modules
 │   ├── app_settings_manager.py # Persistent app settings storage
 │   ├── preset_manager.py      # Preset storage and management
@@ -130,7 +144,8 @@ TAMIAS/
 ├── TAMIAS.py                  # Main application entry point
 ├── TAMIAS.spec                # PyInstaller build specification
 ├── requirements.txt           # Python dependencies
-├── pixelsize_presets.json     # Legacy preset fallback data
+├── presets_defaults.json      # Shipped preset/crop defaults
+├── settings_defaults.json     # Shipped app settings defaults
 ├── tamias.ico                 # Application icon
 └── tamias.png                 # About dialog logo
 ```
