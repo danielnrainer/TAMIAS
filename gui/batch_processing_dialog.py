@@ -523,7 +523,7 @@ class BatchProcessingDialog(QDialog):
             QApplication.processEvents()
 
             try:
-                success, error, _, pixel_metadata = processor.load_image(file_path)
+                success, error, _ = processor.load_image(file_path)
                 if not success:
                     failed.append((file_path, error))
                     continue
@@ -546,18 +546,10 @@ class BatchProcessingDialog(QDialog):
                         )
                         continue
 
-                file_nm_per_pixel = nm_per_pixel
-                if pixel_metadata and "pixel_size_nm" in pixel_metadata:
-                    if pixel_unit == "µm":
-                        file_nm_per_pixel = pixel_metadata["pixel_size_um"]
-                    else:
-                        file_nm_per_pixel = pixel_metadata["pixel_size_nm"]
-                    print(f"Using pixel size from {Path(file_path).name}: {file_nm_per_pixel:.3f} {pixel_unit}")
-
                 if auto_bc:
                     processor.auto_adjust_contrast()
 
-                q_image = renderer.render_image_with_overlays(processor.get_current_image(), file_nm_per_pixel)
+                q_image = renderer.render_image_with_overlays(processor.get_current_image(), nm_per_pixel)
                 if q_image is None:
                     failed.append((file_path, "Failed to render image"))
                     continue

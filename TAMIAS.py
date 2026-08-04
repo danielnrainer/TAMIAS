@@ -675,35 +675,14 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         
         if file_path:
             self.single_io_directory = str(Path(file_path).parent)
-            success, error, dimensions, pixel_metadata = self.image_processor.load_image(file_path)
-            
+            success, error, dimensions = self.image_processor.load_image(file_path)
+
             if success:
                 self.current_file = file_path
                 width, height = dimensions
                 filename = Path(file_path).name
                 self.file_info_label.setText(f"File: {filename} | Size: {width}x{height}px")
-                
-                # If we got pixel metadata from rodhypix file, automatically set the calibration
-                if pixel_metadata and 'pixel_size_nm' in pixel_metadata:
-                    # Set the pixel size calibration automatically
-                    nm_per_pixel = float(pixel_metadata['pixel_size_nm'])
-                    um_per_pixel = float(pixel_metadata['pixel_size_um'])
-                    
-                    # Determine which unit is more appropriate (prefer nm for < 1 µm, µm for >= 1 µm)
-                    preferred_unit = "µm" if um_per_pixel >= 1.0 else "nm"
 
-                    # Keep calibration in nm/pixel internally and avoid signal-driven overwrites.
-                    self.nm_per_pixel = nm_per_pixel
-                    self.pixel_size_unit = preferred_unit
-                    self.pixel_size_unit_combo.blockSignals(True)
-                    self.pixel_size_unit_combo.setCurrentText(preferred_unit)
-                    self.pixel_size_unit_combo.blockSignals(False)
-                    
-                    # Show a message to the user
-                    info_text = f"Pixel size from file header: {nm_per_pixel:.1f} nm ({um_per_pixel:.3f} µm)"
-                    print(info_text)
-                    self.file_info_label.setText(f"File: {filename} | Size: {width}x{height}px | {info_text}")
-                
                 # Auto adjust and display
                 self.image_processor.auto_adjust_contrast()
                 self._update_brightness_sliders()

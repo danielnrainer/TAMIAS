@@ -5,6 +5,9 @@ from PyInstaller.utils.hooks import collect_submodules
 # Collect all PyQt6 submodules to avoid missing plugin issues on some systems
 hidden_pyqt6 = collect_submodules('PyQt6')
 hidden_pil = collect_submodules('PIL')
+# rodhypix ships a compiled ty6_cpp extension (.pyd) alongside the pure-Python backend;
+# listing it in hiddenimports makes PyInstaller's graph analysis pick up the binary too
+hidden_rodhypix = collect_submodules('rodhypix')
 
 block_cipher = None
 
@@ -24,14 +27,14 @@ a = Analysis(
         ('gui', 'gui'),
         ('utils', 'utils'),
     ],
-    hiddenimports=hidden_pyqt6 + hidden_pil + [
-        'PyQt6.QtCore', 
-        'PyQt6.QtGui', 
+    hiddenimports=hidden_pyqt6 + hidden_pil + hidden_rodhypix + [
+        'PyQt6.QtCore',
+        'PyQt6.QtGui',
         'PyQt6.QtWidgets',
         'core.image_processor',
         'core.crop_geometry',
         'core.overlay_renderer',
-        'core.rod_image_reader',
+        'rodhypix',
         'gui.app_state_manager',
         'gui.batch_processing_dialog',
         'gui.collapsible_box',

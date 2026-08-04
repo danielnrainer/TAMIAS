@@ -42,8 +42,7 @@ If you encounter any issue and would like to report it or have a feature request
 - **TIFF** (`.tif`, `.tiff`) - Standard microscopy format
 - **RODHyPix** (`.rodhypix`) - Rigaku Oxford Diffraction native format
   - Automatically extracts pixel size from file header
-  - Supports Numba acceleration for faster loading (~10x speedup)
-  - Pure Python fallback if Numba is not installed
+  - Read via the [rodhypix](https://pypi.org/project/rodhypix/) package, using its native C++/NumPy backend when available (falls back to pure Python)
 - **PNG** (`.png`)
 - **JPEG** (`.jpg`, `.jpeg`)
 - **BMP** (`.bmp`)
@@ -62,12 +61,7 @@ cd TAMIAS
 ```bash
 pip install -r requirements.txt
 ```
-
-3. **(Optional)** Install Numba for faster RODHyPix file loading:
-```bash
-pip install numba
-```
-  This provides ~10x speedup when loading `.rodhypix` files. The application works without it using pure Python decompression.
+  This includes [rodhypix](https://pypi.org/project/rodhypix/), which provides `.rodhypix` file support with a native C++/NumPy backend on supported platforms and a pure Python fallback elsewhere.
 
 ### Usage
 
@@ -158,31 +152,25 @@ TAMIAS/
 - NumPy >= 1.24, < 3
 - Pillow >= 10, < 13
 - PyInstaller >= 6.0, < 7 (for building executables)
-
-### Optional Dependencies
-
-- **numba** >= 0.60, < 1 (recommended for `.rodhypix` files)
-  - Provides ~10x speedup for RODHyPix decompression
-  - Install with: `pip install numba`
+- rodhypix >= 0.1.1, < 0.2 (for `.rodhypix` file support)
 
 ## Technical Details
 
 - **Image Processing**: 8-bit grayscale (16-bit images auto-normalized)
 - **Cropping**: Top/bottom row crop and interactive manual crop are available before overlay rendering
 - **Scalebar Calculation**: Accounts for nm/pixel calibration
-- **RODHyPix Support**: 
-  - Native reader adapted from [cap-auto](https://github.com/robertbuecker/cap-auto) (BSD 3-Clause)
+- **RODHyPix Support**:
+  - Read via the [rodhypix](https://pypi.org/project/rodhypix/) package (BSD 3-Clause)
   - Automatic pixel size extraction from file header
   - Supports TY6 compressed format
-  - Optimized with Numba JIT compilation when available
-  - Pure Python fallback for compatibility
+  - Native C++/NumPy backend used automatically when available, with a pure Python fallback
 - **Architecture**: Modular design with separate core, GUI, and utility modules, with crop and batch workflows split into dedicated modules
 - **UI**: Collapsible sections and scrollable batch controls for efficient screen space management
 - **Particle Measurement**: Click-and-drag lines with auto-computed length labels; per-measurement line/text styles, cap styles, width, and label visibility; label positions stored as per-measurement image-pixel offsets and fully repositionable via drag
 
 ## Acknowledgments
 
-- RODHyPix image reader adapted from [cap-auto](https://github.com/robertbuecker/cap-auto) by Robert Bücker (BSD 3-Clause)
+- RODHyPix file support provided by the [rodhypix](https://pypi.org/project/rodhypix/) package by Robert Bücker (BSD 3-Clause)
   - Original dxtbx code by David Waterman & Takanori Nakane
   - Copyright: 2018-2023 United Kingdom Research and Innovation & 2022-2023 Takanori Nakane
 
