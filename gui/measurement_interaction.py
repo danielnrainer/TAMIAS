@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from PyQt6.QtGui import QColor
+from qtpy.QtGui import QColor
 
 
 class MeasurementInteractionController:

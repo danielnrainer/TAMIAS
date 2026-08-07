@@ -7,9 +7,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QImage
-from PyQt6.QtWidgets import (
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QColor, QImage
+from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,

@@ -1,6 +1,6 @@
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPushButton
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QCursor, QPalette
+from qtpy.QtWidgets import QWidget, QVBoxLayout, QPushButton
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QColor, QCursor, QPalette
 
 class QCollapsibleBox(QWidget):
     """A custom collapsible box widget"""

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import (
+from qtpy.QtCore import Qt, QTimer
+from qtpy.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,

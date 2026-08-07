@@ -1,6 +1,6 @@
 """Dialog for cropping rows from the top and bottom of an image."""
 
-from PyQt6.QtWidgets import (
+from qtpy.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,

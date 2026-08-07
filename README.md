@@ -2,7 +2,7 @@
 
 Tool for Annotation and Markup of Images from a Synergy-ED
 
-A PyQt6 desktop application for annotating and marking up real space images with calibrated overlays, crop controls, particle measurement tools, and batch processing support. Its main use is for images acquired on a Rigaku XtaLAB Synergy-ED, but can in principle be used for images from other instruments too.
+A Qt desktop application for annotating and marking up real space images with calibrated overlays, crop controls, particle measurement tools, and batch processing support. Its main use is for images acquired on a Rigaku XtaLAB Synergy-ED, but can in principle be used for images from other instruments too. The Qt abstraction is provided by `qtpy`, allowing either PyQt6 or PySide6 as the backend.
 
 
 _Disclaimer_\
@@ -61,7 +61,7 @@ cd TAMIAS
 ```bash
 pip install -r requirements.txt
 ```
-  This includes [rodhypix](https://pypi.org/project/rodhypix/), which provides `.rodhypix` file support with a native C++/NumPy backend on supported platforms and a pure Python fallback elsewhere.
+  Install one Qt backend as well, for example `pip install PyQt6` or `pip install PySide6`. This includes [rodhypix](https://pypi.org/project/rodhypix/), which provides `.rodhypix` file support with a native C++/NumPy backend on supported platforms and a pure Python fallback elsewhere.
 
 ### Usage
 
@@ -148,7 +148,8 @@ TAMIAS/
 ## Requirements
 
 - Python 3.8+
-- PyQt6 >= 6.5, < 7
+- qtpy >= 2.4, < 3
+- One Qt backend: PyQt6 or PySide6
 - NumPy >= 1.24, < 3
 - Pillow >= 10, < 13
 - PyInstaller >= 6.0, < 7 (for building executables)
