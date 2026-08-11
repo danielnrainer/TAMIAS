@@ -2,12 +2,11 @@
 
 from PyInstaller.utils.hooks import collect_submodules
 
-# Collect qtpy and the selected Qt backend to avoid missing plugin issues.
+# Importing qtpy exposes the active Qt backend. PyInstaller's Qt hooks collect
+# the backend libraries and plugins required by the Qt modules TAMIAS uses.
 import qtpy
 
 qt_backend = qtpy.API_NAME
-hidden_qtpy = collect_submodules('qtpy')
-hidden_qt_backend = collect_submodules(qt_backend)
 hidden_pil = collect_submodules('PIL')
 # rodhypix ships a compiled ty6_cpp extension (.pyd) alongside the pure-Python backend;
 # listing it in hiddenimports makes PyInstaller's graph analysis pick up the binary too
@@ -31,7 +30,7 @@ a = Analysis(
         ('gui', 'gui'),
         ('utils', 'utils'),
     ],
-    hiddenimports=hidden_qtpy + hidden_qt_backend + hidden_pil + hidden_rodhypix + [
+    hiddenimports=hidden_pil + hidden_rodhypix + [
         f'{qt_backend}.QtCore',
         f'{qt_backend}.QtGui',
         f'{qt_backend}.QtWidgets',
