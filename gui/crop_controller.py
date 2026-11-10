@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen
-from PyQt6.QtWidgets import (
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QColor, QImage, QPainter, QPen
+from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
     QHBoxLayout,

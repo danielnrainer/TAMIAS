@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QColor, QPalette
-from PyQt6.QtWidgets import QApplication
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QAction, QColor, QPalette
+from qtpy.QtWidgets import QApplication
 
 
 class ThemeManager:

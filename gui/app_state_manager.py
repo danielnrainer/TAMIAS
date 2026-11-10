@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PyQt6.QtGui import QColor
+from qtpy.QtGui import QColor
 
 from gui.custom_widgets import set_color_button_indicator
 from utils.app_settings_manager import AppSettingsStorage

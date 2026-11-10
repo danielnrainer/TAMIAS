@@ -6,8 +6,8 @@ Handles drawing scalebar, aperture, and measurement overlays on images.
 from typing import Optional
 import math
 import numpy as np
-from PyQt6.QtGui import QImage, QPainter, QPen, QBrush, QColor, QFont
-from PyQt6.QtCore import Qt, QRectF
+from qtpy.QtGui import QImage, QPainter, QPen, QBrush, QColor, QFont
+from qtpy.QtCore import Qt, QRectF
 
 
 class OverlayRenderer:

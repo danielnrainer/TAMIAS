@@ -1,6 +1,6 @@
 """
 TAMIAS - Main GUI application.
-A PyQt6 application for processing TEM images with scalebar addition,
+A Qt application for processing TEM images with scalebar addition,
 brightness/contrast adjustment, and export capabilities.
 """
 
@@ -12,16 +12,16 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 
-from PyQt6.QtWidgets import (
+from qtpy.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QSlider, QFileDialog, QComboBox, QDoubleSpinBox,
     QGroupBox, QCheckBox, QMessageBox, QSpinBox, QDialog, QListWidget,
     QTableWidget, QTableWidgetItem, QAbstractItemView,
     QProgressDialog, QScrollArea, QSplitter, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, QSize, QUrl
-from PyQt6.QtGui import QPixmap, QImage, QAction, QActionGroup, QColor, QFont, QPalette, QBrush, QIcon, QDesktopServices
-from PyQt6.QtWidgets import QColorDialog, QFontDialog
+from qtpy.QtCore import Qt, QTimer, QSize, QUrl
+from qtpy.QtGui import QPixmap, QImage, QAction, QActionGroup, QColor, QFont, QPalette, QBrush, QIcon, QDesktopServices
+from qtpy.QtWidgets import QColorDialog, QFontDialog
 
 # Import our modules
 from core.image_processor import ImageProcessor

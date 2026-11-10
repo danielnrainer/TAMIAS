@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QModelIndex, QSize, QItemSelectionModel, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPixmap
-from PyQt6.QtWidgets import QDoubleSpinBox, QLabel, QPushButton, QTableWidget
+from qtpy.QtCore import Qt, QModelIndex, QSize, QItemSelectionModel, Signal
+from qtpy.QtGui import QColor, QIcon, QPixmap
+from qtpy.QtWidgets import QDoubleSpinBox, QLabel, QPushButton, QTableWidget
 
 
 class SmartDoubleSpinBox(QDoubleSpinBox):
@@ -22,10 +22,10 @@ class SmartDoubleSpinBox(QDoubleSpinBox):
 class ImageDisplayLabel(QLabel):
     """Image label that supports draw mode and drag mode mouse signals."""
 
-    clicked = pyqtSignal(int, int)
-    mouse_pressed = pyqtSignal(int, int)
-    mouse_moved = pyqtSignal(int, int)
-    mouse_released = pyqtSignal(int, int)
+    clicked = Signal(int, int)
+    mouse_pressed = Signal(int, int)
+    mouse_moved = Signal(int, int)
+    mouse_released = Signal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)

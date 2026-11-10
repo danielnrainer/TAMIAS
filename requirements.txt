@@ -1,4 +1,5 @@
-PyQt6>=6.5,<7
+qtpy>=2.4,<3
+PySide6>=6.5,<7
 numpy>=1.24,<3
 Pillow>=10,<13
 pyinstaller>=6.0,<7

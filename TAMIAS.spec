@@ -2,8 +2,11 @@
 
 from PyInstaller.utils.hooks import collect_submodules
 
-# Collect all PyQt6 submodules to avoid missing plugin issues on some systems
-hidden_pyqt6 = collect_submodules('PyQt6')
+# Importing qtpy exposes the active Qt backend. PyInstaller's Qt hooks collect
+# the backend libraries and plugins required by the Qt modules TAMIAS uses.
+import qtpy
+
+qt_backend = qtpy.API_NAME
 hidden_pil = collect_submodules('PIL')
 # rodhypix ships a compiled ty6_cpp extension (.pyd) alongside the pure-Python backend;
 # listing it in hiddenimports makes PyInstaller's graph analysis pick up the binary too
@@ -27,10 +30,10 @@ a = Analysis(
         ('gui', 'gui'),
         ('utils', 'utils'),
     ],
-    hiddenimports=hidden_pyqt6 + hidden_pil + hidden_rodhypix + [
-        'PyQt6.QtCore',
-        'PyQt6.QtGui',
-        'PyQt6.QtWidgets',
+    hiddenimports=hidden_pil + hidden_rodhypix + [
+        f'{qt_backend}.QtCore',
+        f'{qt_backend}.QtGui',
+        f'{qt_backend}.QtWidgets',
         'core.image_processor',
         'core.crop_geometry',
         'core.overlay_renderer',
@@ -57,33 +60,19 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Exclude unnecessary PyQt6 modules to reduce size
-        'PyQt6.QtWebEngine',
-        'PyQt6.QtWebEngineWidgets',
-        'PyQt6.QtWebEngineCore',
-        'PyQt6.QtNetwork',
-        'PyQt6.QtBluetooth',
-        'PyQt6.QtDBus',
-        'PyQt6.QtDesigner',
-        'PyQt6.QtHelp',
-        'PyQt6.QtLocation',
-        'PyQt6.QtMultimedia',
-        'PyQt6.QtMultimediaWidgets',
-        'PyQt6.QtNfc',
-        'PyQt6.QtPositioning',
-        'PyQt6.QtQml',
-        'PyQt6.QtQuick',
-        'PyQt6.QtQuickWidgets',
-        'PyQt6.QtRemoteObjects',
-        'PyQt6.QtSensors',
-        'PyQt6.QtSerialPort',
-        'PyQt6.QtSql',  # SQL module - not needed
-        'PyQt6.QtSvg',
-        'PyQt6.QtSvgWidgets',
-        'PyQt6.QtTest',
-        'PyQt6.QtWebChannel',
-        'PyQt6.QtWebSockets',
-        'PyQt6.QtXml',
+        # Exclude unnecessary Qt modules to reduce size.
+        *[
+            f'{qt_backend}.{module}'
+            for module in (
+                'QtWebEngine', 'QtWebEngineWidgets', 'QtWebEngineCore',
+                'QtNetwork', 'QtBluetooth', 'QtDBus', 'QtDesigner',
+                'QtHelp', 'QtLocation', 'QtMultimedia', 'QtMultimediaWidgets',
+                'QtNfc', 'QtPositioning', 'QtQml', 'QtQuick', 'QtQuickWidgets',
+                'QtRemoteObjects', 'QtSensors', 'QtSerialPort', 'QtSql',
+                'QtSvg', 'QtSvgWidgets', 'QtTest', 'QtWebChannel',
+                'QtWebSockets', 'QtXml',
+            )
+        ],
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
