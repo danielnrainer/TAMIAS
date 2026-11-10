@@ -25,7 +25,7 @@ from gui.custom_widgets import ClickClearTableWidget, SmartDoubleSpinBox, set_co
 
 def setup_preset_controls(editor: Any, parent_layout):
     """Setup imaging mode preset controls on the main editor."""
-    preset_box = QCollapsibleBox("Imaging Mode", expanded=True)
+    preset_box = QCollapsibleBox("Imaging Mode", expanded=False)
     preset_layout = QVBoxLayout()
 
     editor.preset_combo = QComboBox()

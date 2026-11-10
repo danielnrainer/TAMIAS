@@ -66,7 +66,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TAMIAS")
-        self.setGeometry(100, 100, 1100, 700)
+        self.setGeometry(100, 100, 1100, 600)
 
         self._app_settings = AppSettingsStorage.load_settings()
         self._theme_manager = ThemeManager()
@@ -583,12 +583,6 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         controls_layout = QVBoxLayout()
         controls_widget.setLayout(controls_layout)
         
-        # Load button
-        load_btn = QPushButton("Load Image")
-        load_btn.setMinimumHeight(40)
-        load_btn.clicked.connect(self.load_image)
-        controls_layout.addWidget(load_btn)
-        
         # Imaging mode preset
         self._setup_preset_controls(controls_layout)
 
@@ -610,20 +604,31 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         # Particle measurement controls
         self._setup_measurement_controls(controls_layout)
         
-        # Export button
+        controls_layout.addStretch()
+
+        # Set the scroll area's widget
+        scroll_area.setWidget(controls_widget)
+
+        # Export button stays pinned below the scrollable controls
         export_btn = QPushButton("Export Image")
         export_btn.setMinimumHeight(40)
         export_btn.clicked.connect(self.export_image)
-        controls_layout.addWidget(export_btn)
-        
-        controls_layout.addStretch()
-        
-        # Set the scroll area's widget and add to main layout
-        scroll_area.setWidget(controls_widget)
+
+        right_panel = QWidget()
+        right_panel.setMinimumWidth(260)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        # Load button stays pinned above the scrollable controls
+        load_btn = QPushButton("Load Image")
+        load_btn.setMinimumHeight(40)
+        load_btn.clicked.connect(self.load_image)
+        right_layout.addWidget(load_btn)
+        right_layout.addWidget(scroll_area, 1)
+        right_layout.addWidget(export_btn)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(image_widget)
-        splitter.addWidget(scroll_area)
+        splitter.addWidget(right_panel)
         splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(8)
         splitter.setStretchFactor(0, 3)
