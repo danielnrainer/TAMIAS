@@ -34,7 +34,11 @@ from core.image_processor import ImageProcessor
 from core.overlay_renderer import OverlayRenderer
 from gui.collapsible_box import QCollapsibleBox
 from gui.custom_widgets import SmartDoubleSpinBox, set_color_button_indicator
-from utils.imaging_mode_defaults import get_mode_overlay_defaults
+from utils.imaging_mode_defaults import (
+    AUTO_FALLBACK_PRESET,
+    AUTO_PRESET_LABEL,
+    get_mode_overlay_defaults,
+)
 
 
 class BatchProcessingDialog(QDialog):
@@ -105,16 +109,31 @@ class BatchProcessingDialog(QDialog):
         params_layout = QVBoxLayout()
 
         preset_layout = QHBoxLayout()
-        preset_layout.addWidget(QLabel("Preset:"))
+        preset_layout.addWidget(QLabel("Imaging mode:"))
         self.preset_combo = QComboBox()
+        self.preset_combo.addItem(AUTO_PRESET_LABEL)
         self.preset_combo.addItems(sorted(self.presets.keys()))
-        self.preset_combo.setCurrentText("Standard")
+        self.preset_combo.setCurrentText(AUTO_PRESET_LABEL)
         self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
         preset_layout.addWidget(self.preset_combo)
         params_layout.addLayout(preset_layout)
 
+        # Only relevant in Auto mode: preset used for files without a header pixel size
+        fallback_layout = QHBoxLayout()
+        self.fallback_label = QLabel("Fallback preset:")
+        fallback_layout.addWidget(self.fallback_label)
+        self.fallback_combo = QComboBox()
+        self.fallback_combo.addItems(sorted(self.presets.keys()))
+        if AUTO_FALLBACK_PRESET in self.presets:
+            self.fallback_combo.setCurrentText(AUTO_FALLBACK_PRESET)
+        self.fallback_combo.currentTextChanged.connect(self._on_preset_changed)
+        fallback_layout.addWidget(self.fallback_combo)
+        self.fallback_widgets = [self.fallback_label, self.fallback_combo]
+        params_layout.addLayout(fallback_layout)
+
         pixel_layout = QHBoxLayout()
-        pixel_layout.addWidget(QLabel("Pixel size:"))
+        self.pixel_size_label = QLabel("Pixel size:")
+        pixel_layout.addWidget(self.pixel_size_label)
         self.pixel_size_spinbox = QDoubleSpinBox()
         self.pixel_size_spinbox.setRange(0.00001, 100000.0)
         self.pixel_size_spinbox.setDecimals(3)
@@ -125,6 +144,14 @@ class BatchProcessingDialog(QDialog):
         self.pixel_unit_combo.addItems(["nm", "µm"])
         pixel_layout.addWidget(self.pixel_unit_combo)
         params_layout.addLayout(pixel_layout)
+
+        self.auto_info_label = QLabel(
+            "Auto: each .rodhypix file's header pixel size is used; files without one "
+            "(e.g. TIFF) use the fallback preset above."
+        )
+        self.auto_info_label.setWordWrap(True)
+        self.auto_info_label.setStyleSheet("font-style: italic")
+        params_layout.addWidget(self.auto_info_label)
 
         crop_box = QCollapsibleBox("Image Cropping", expanded=False)
         self.batch_crop_box = crop_box
@@ -333,7 +360,7 @@ class BatchProcessingDialog(QDialog):
             self.output_folder_edit.setText(self.last_output_directory)
 
         self._update_batch_section_titles()
-        self._on_preset_changed("Standard")
+        self._on_preset_changed(AUTO_PRESET_LABEL)
 
     @staticmethod
     def _format_batch_section_title(base_title: str, applied: bool) -> str:
@@ -384,7 +411,23 @@ class BatchProcessingDialog(QDialog):
         self.files.clear()
         self.file_list.clear()
 
-    def _on_preset_changed(self, preset_name: str):
+    def _effective_preset_name(self) -> str:
+        """Preset whose pixel size applies (the fallback preset when in Auto mode)."""
+        mode = self.preset_combo.currentText()
+        return self.fallback_combo.currentText() if mode == AUTO_PRESET_LABEL else mode
+
+    def _on_preset_changed(self, _text: str = ""):
+        is_auto = self.preset_combo.currentText() == AUTO_PRESET_LABEL
+        for widget in self.fallback_widgets:
+            widget.setVisible(is_auto)
+        self.auto_info_label.setVisible(is_auto)
+        self.pixel_size_label.setText("Fallback pixel size:" if is_auto else "Pixel size:")
+
+        preset_name = self._effective_preset_name()
+        is_custom = preset_name == "Custom"
+        self.pixel_size_spinbox.setEnabled(is_custom)
+        self.pixel_unit_combo.setEnabled(is_custom)
+
         if preset_name in self.presets:
             try:
                 npp = float(self.presets[preset_name])
@@ -463,6 +506,8 @@ class BatchProcessingDialog(QDialog):
         nm_per_pixel = pixel_size * 1000.0 if pixel_unit == "µm" else pixel_size
         if nm_per_pixel <= 0:
             nm_per_pixel = 1.0
+        fallback_nm_per_pixel = nm_per_pixel
+        use_file_pixel_size = self.preset_combo.currentText() == AUTO_PRESET_LABEL
 
         auto_bc = self.auto_bc_checkbox.isChecked()
 
@@ -548,6 +593,9 @@ class BatchProcessingDialog(QDialog):
 
                 if auto_bc:
                     processor.auto_adjust_contrast()
+
+                file_nm = processor.get_file_pixel_size_nm() if use_file_pixel_size else None
+                nm_per_pixel = file_nm if file_nm else fallback_nm_per_pixel
 
                 q_image = renderer.render_image_with_overlays(processor.get_current_image(), nm_per_pixel)
                 if q_image is None:

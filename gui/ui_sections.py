@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.collapsible_box import QCollapsibleBox
+from utils.imaging_mode_defaults import AUTO_PRESET_LABEL
 from gui.custom_widgets import ClickClearTableWidget, SmartDoubleSpinBox, set_color_button_indicator
 
 
@@ -50,18 +51,24 @@ def setup_preset_controls(editor: Any, parent_layout):
 
     preset_layout.addLayout(pixel_size_layout)
 
+    editor.calibration_source_label = QLabel("")
+    editor.calibration_source_label.setWordWrap(True)
+    preset_layout.addWidget(editor.calibration_source_label)
+
     preset_info_label = QLabel(
+        "Auto uses the pixel size stored in .rodhypix files (not present in TIFFs or post-experiment images - choose a preset for those). "
         "To change the pixel size of presets, go to Settings > Manage Presets in the main menu."
     )
     preset_info_label.setWordWrap(True)
     preset_info_label.setStyleSheet("font-style: italic")
     preset_layout.addWidget(preset_info_label)
 
-    if "Standard" in editor.presets:
-        editor.preset_combo.setCurrentText("Standard")
-        QTimer.singleShot(0, editor._apply_initial_scalebar_defaults)
+    # Default to Auto: use the file header pixel size where available, presets as fallback
+    editor.preset_combo.setCurrentText(AUTO_PRESET_LABEL)
+    QTimer.singleShot(0, editor._apply_initial_scalebar_defaults)
 
     editor._update_pixel_size_editable_state(editor.preset_combo.currentText())
+    editor._update_calibration_source_label()
 
     preset_box.setContentLayout(preset_layout)
     parent_layout.addWidget(preset_box)

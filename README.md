@@ -15,7 +15,7 @@ If you encounter any issue and would like to report it or have a feature request
 ## Features
 
 - **Image Processing**: Load TIF/TIFF/RODHyPix images with automatic brightness/contrast adjustment
-- **RODHyPix Support**: Native support for `.rodhypix` detector image files with automatic pixel size extraction
+- **RODHyPix Support**: Native support for `.rodhypix` image files, including automatic direct-space pixel size calibration read from the file header where available (recommended over TIFF)
 - **Cropping Tools**: Batch top/bottom row crop plus interactive manual crop with square/aspect controls and drag/move support
 - **Smart Scalebars**: Calibrated scalebars with customizable appearance (length, thickness, position, colors, font, background box)
 - **Aperture Overlay**: Visualize SAED aperture sizes on images
@@ -31,7 +31,7 @@ If you encounter any issue and would like to report it or have a feature request
 - **Theme Support**: Light, dark, and auto (system) theme modes
 - **Resizable Workspace**: Adjustable splitter between image pane and control pane
 - **Batch Processing**: Dedicated dialog with scrollable collapsible sections, applied/not-applied status markers, and crop/overlay/export settings
-- **Imaging Presets**: Store and manage pixel size calibrations for different imaging modes
+- **Imaging Presets**: Store and manage pixel size calibrations for different imaging modes (fallback for files without a header pixel size, e.g. TIFF)
 - **Persistent Settings**: Theme, window size, annotation defaults, preset defaults, and file-dialog folders are retained between sessions
 - **Preset Import/Export**: Load preset JSON files from other machines and save current presets back out to file
 - **Compact UI**: Laptop-friendly interface with collapsible sections and scrollable controls
@@ -39,10 +39,11 @@ If you encounter any issue and would like to report it or have a feature request
 
 ## Supported File Formats
 
-- **TIFF** (`.tif`, `.tiff`) - Standard microscopy format
 - **RODHyPix** (`.rodhypix`) - Rigaku Oxford Diffraction native format
-  - Automatically extracts pixel size from file header
+  - Direct-space pixel size is read from the file header, so no preset is needed for images that contain it
+  - *Not every image carries it*: with CrysAlisPro v45.96 (and earlier), post-experiment images might not store a pixel size, so an imaging preset must be selected for those (see below)
   - Read via the [rodhypix](https://pypi.org/project/rodhypix/) package, using its native C++/NumPy backend when available (falls back to pure Python)
+- **TIFF** (`.tif`, `.tiff`) - Standard image format; might not carry pixel size calibration, so preset is required
 - **PNG** (`.png`)
 - **JPEG** (`.jpg`, `.jpeg`)
 - **BMP** (`.bmp`)
@@ -96,7 +97,7 @@ At runtime, user-specific files in `%APPDATA%/TAMIAS` override these shipped def
 
 **Basic Workflow:**
 1. Load an image (Ctrl+O)
-2. Select imaging mode preset or enter pixel size manually
+2. Leave the imaging mode on **Auto (from file)** to use the pixel size stored in `.rodhypix` files. If the file has none (TIFF and other formats, and `.rodhypix` post-experiment images), TAMIAS switches to the `Standard` preset - **check that this matches the imaging mode used and select the correct preset or enter a pixel size via Custom if not**
 3. Adjust brightness/contrast (Auto Adjust recommended)
 4. Optionally crop away top/bottom rows or use the manual crop tool for a custom selection
 5. Configure scalebar settings (length, position, colors)
@@ -152,7 +153,7 @@ TAMIAS/
 - NumPy >= 1.24, < 3
 - Pillow >= 10, < 13
 - PyInstaller >= 6.0, < 7 (for building executables)
-- rodhypix >= 0.1.1, < 0.2 (for `.rodhypix` file support)
+- rodhypix >= 0.1.3, < 0.2 (for `.rodhypix` file support)
 
 ## Technical Details
 
@@ -161,9 +162,9 @@ TAMIAS/
 - **Scalebar Calculation**: Accounts for nm/pixel calibration
 - **RODHyPix Support**:
   - Read via the [rodhypix](https://pypi.org/project/rodhypix/) package (BSD 3-Clause)
-  - Automatic pixel size extraction from file header
-  - Supports TY6 compressed format
-  - Native C++/NumPy backend used automatically when available, with a pure Python fallback
+  - Direct-space pixel size (`direct_space_pixel_size_nm`) read from the file header; used by the **Auto (from file)** imaging mode. If a file has no valid value (stored as 0), the imaging mode switches to the `Standard` preset automatically (and back to Auto when the next file has a header value, unless a preset was chosen manually)
+  - Known limitation: as of CrysAlisPro v45.96, post-experiment images do not contain the direct-space pixel size (the header field is 0), so they always use the preset fallback; the preset may differ from the actual imaging mode, so select it manually
+  - In batch mode, Auto uses each file's own header pixel size; files without one use the batch dialog's **Fallback preset** (default Standard). The pixel size field is only editable when the selected (or fallback) preset is Custom
 - **Architecture**: Modular design with separate core, GUI, and utility modules, with crop and batch workflows split into dedicated modules
 - **UI**: Collapsible sections and scrollable batch controls for efficient screen space management
 - **Particle Measurement**: Click-and-drag lines with auto-computed length labels; per-measurement line/text styles, cap styles, width, and label visibility; label positions stored as per-measurement image-pixel offsets and fully repositionable via drag

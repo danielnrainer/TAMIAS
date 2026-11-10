@@ -2,4 +2,4 @@ PyQt6>=6.5,<7
 numpy>=1.24,<3
 Pillow>=10,<13
 pyinstaller>=6.0,<7
-rodhypix>=0.1.1,<0.2
+rodhypix>=0.1.3,<0.2

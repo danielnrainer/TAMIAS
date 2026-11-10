@@ -17,7 +17,8 @@ class ImageProcessor:
         self.raw_image: Optional[np.ndarray] = None  # Store raw data before normalization
         self.current_image: Optional[np.ndarray] = None
         self.input_dpi: Optional[Tuple[float, float]] = None
-        self.rod_header_info: Optional[Dict] = None  # .rodhypix header metadata, kept but unused for now
+        self.rod_header_info: Optional[Dict] = None  # .rodhypix header metadata
+        self.file_pixel_size_nm: Optional[float] = None  # Direct-space pixel size from file header
         self.min_val = 0
         self.max_val = 255
         
@@ -28,13 +29,14 @@ class ImageProcessor:
         Returns:
             (success, error_message, (width, height))
 
-        Pixel size calibration is not derived from file headers (for either .tiff or
-        .rodhypix) since the detector geometry stored in .rodhypix headers doesn't map
-        to a real-space pixel size. Use imaging-mode presets for calibration instead.
+        For .rodhypix files the direct-space pixel size is read from the header
+        (see get_file_pixel_size_nm). TIFF and other formats carry no such calibration;
+        use imaging-mode presets for those.
         """
         try:
             file_ext = Path(file_path).suffix.lower()
             self.rod_header_info = None
+            self.file_pixel_size_nm = None
 
             # Check if it's a .rodhypix file
             if file_ext == '.rodhypix':
@@ -45,8 +47,15 @@ class ImageProcessor:
                 self.original_image = reader.get_raw_data()
                 self.raw_image = self.original_image.copy()
 
-                # Kept for potential future use (e.g. calibration); not used for now.
                 self.rod_header_info = reader.get_header_info()
+
+                # Direct-space pixel size (rodhypix >= 0.1.2); absent/zero/invalid -> None
+                try:
+                    size_nm = float(self.rod_header_info.get("direct_space_pixel_size_nm"))
+                    if np.isfinite(size_nm) and size_nm > 0:
+                        self.file_pixel_size_nm = size_nm
+                except (TypeError, ValueError):
+                    pass
 
                 print(f"\nLoaded .rodhypix file")
                 print(f"Decompression method: {reader.get_decompression_method()}")
@@ -323,6 +332,10 @@ class ImageProcessor:
         """Check if an image is loaded."""
         return self.current_image is not None
     
+    def get_file_pixel_size_nm(self) -> Optional[float]:
+        """Direct-space pixel size (nm/pixel) from the file header, or None if unavailable."""
+        return self.file_pixel_size_nm
+
     def get_dpi(self) -> Optional[Tuple[float, float]]:
         """Get the input DPI if available."""
         return self.input_dpi

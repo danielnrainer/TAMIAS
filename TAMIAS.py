@@ -29,7 +29,12 @@ from core.overlay_renderer import OverlayRenderer
 from core.crop_geometry import compute_display_mapping, map_label_to_image_coords, point_to_segment_distance
 from utils.preset_manager import PresetManager, PresetStorage
 from utils.app_settings_manager import AppSettingsStorage
-from utils.imaging_mode_defaults import get_mode_overlay_defaults
+from utils.imaging_mode_defaults import (
+    AUTO_FALLBACK_PRESET,
+    AUTO_PRESET_LABEL,
+    derive_overlay_defaults,
+    get_mode_overlay_defaults,
+)
 from utils.storage_paths import ensure_app_storage_dir
 from gui.custom_widgets import (
     ClickClearTableWidget,
@@ -690,7 +695,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
                 # Reset overlays that are image-specific
                 self._reset_image_specific_overlays(disable_scalebar=True)
 
-                self._refresh_scale_information()
+                # Auto mode: (re)calibrate from the new file's header, else fall back to a preset
+                self._select_calibration_for_loaded_file()
             else:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{error}")
 
@@ -717,34 +723,108 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     
     def on_preset_changed(self, preset_name: str):
         """Handle preset selection change."""
+        if not getattr(self, "_programmatic_preset_change", False):
+            self._auto_fell_back = False  # user made an explicit choice
         self._update_pixel_size_editable_state(preset_name)
-        if preset_name in self.presets:
+        if preset_name == AUTO_PRESET_LABEL:
+            npp, defaults = self._resolve_auto_calibration()
+        elif preset_name in self.presets:
             try:
                 npp = float(self.presets[preset_name])
                 if npp <= 0:
                     npp = 1.0
             except Exception:
                 npp = 1.0
-            
-            self.nm_per_pixel = npp
-            
             defaults = get_mode_overlay_defaults(preset_name)
-            mode_unit = defaults["unit"] if defaults is not None else None
+        else:
+            return
 
-            # Set preset-specific scalebar defaults (only if UI is fully initialized)
-            if defaults is not None and hasattr(self, 'unit_combo') and hasattr(self, 'scalebar_length_spinbox'):
-                if self.unit_combo.currentText() != defaults["unit"]:
-                    self.unit_combo.setCurrentText(defaults["unit"])
-                self.scalebar_length_spinbox.setValue(defaults["scalebar_length_value"])
-                self.scalebar_length_text_raw = defaults["scalebar_length_text"]
+        self.nm_per_pixel = npp
+        self._update_calibration_source_label()
+        mode_unit = defaults["unit"] if defaults is not None else None
 
-            if mode_unit is not None and hasattr(self, 'measurement_unit_combo') and self.measurement_unit_combo.currentText() != mode_unit:
-                self.measurement_unit_combo.setCurrentText(mode_unit)
+        # Set preset-specific scalebar defaults (only if UI is fully initialized)
+        if defaults is not None and hasattr(self, 'unit_combo') and hasattr(self, 'scalebar_length_spinbox'):
+            if self.unit_combo.currentText() != defaults["unit"]:
+                self.unit_combo.setCurrentText(defaults["unit"])
+            self.scalebar_length_spinbox.setValue(defaults["scalebar_length_value"])
+            self.scalebar_length_text_raw = defaults["scalebar_length_text"]
 
+        if mode_unit is not None and hasattr(self, 'measurement_unit_combo') and self.measurement_unit_combo.currentText() != mode_unit:
+            self.measurement_unit_combo.setCurrentText(mode_unit)
+
+        self._refresh_scale_information()
+
+    def _select_calibration_for_loaded_file(self):
+        """Pick the imaging mode for a newly loaded file.
+
+        Files with a header pixel size use Auto. Files without one switch the
+        dropdown to the fallback preset (and back to Auto for the next file that
+        has a header value), unless the user chose a preset themselves.
+        """
+        has_file_size = bool(self.image_processor.get_file_pixel_size_nm())
+        current = self.preset_combo.currentText()
+        target = current
+        if current == AUTO_PRESET_LABEL and not has_file_size and AUTO_FALLBACK_PRESET in self.presets:
+            target = AUTO_FALLBACK_PRESET
+            self._auto_fell_back = True
+        elif has_file_size and getattr(self, "_auto_fell_back", False):
+            target = AUTO_PRESET_LABEL
+            self._auto_fell_back = False
+
+        if target != current:
+            self._programmatic_preset_change = True
+            try:
+                self.preset_combo.setCurrentText(target)  # triggers on_preset_changed
+            finally:
+                self._programmatic_preset_change = False
+        elif current == AUTO_PRESET_LABEL:
+            self.on_preset_changed(AUTO_PRESET_LABEL)
+        else:
+            self._update_calibration_source_label()
             self._refresh_scale_information()
+
+    def _resolve_auto_calibration(self):
+        """Pixel size (nm) and overlay defaults for Auto mode.
+
+        Uses the loaded file's header pixel size when present; otherwise falls back
+        to the 'Standard' preset (or Custom if it is missing).
+        """
+        file_nm = self.image_processor.get_file_pixel_size_nm()
+        if file_nm:
+            width = None
+            if self.image_processor.original_image is not None:
+                width = int(self.image_processor.original_image.shape[1])
+            return file_nm, derive_overlay_defaults(file_nm, width)
+        fallback = AUTO_FALLBACK_PRESET if AUTO_FALLBACK_PRESET in self.presets else "Custom"
+        try:
+            npp = float(self.presets.get(fallback, 1.0))
+        except Exception:
+            npp = 1.0
+        return (npp if npp > 0 else 1.0), get_mode_overlay_defaults(fallback)
+
+    def _update_calibration_source_label(self):
+        """Show where the active pixel size comes from."""
+        label = getattr(self, "calibration_source_label", None)
+        if label is None:
+            return
+        if self.preset_combo.currentText() != AUTO_PRESET_LABEL:
+            if getattr(self, "_auto_fell_back", False):
+                label.setText("No pixel size in file - using preset. Select 'Auto (from file)' to re-enable.")
+            else:
+                label.setText("Pixel size source: preset")
+        elif self.image_processor.get_file_pixel_size_nm():
+            label.setText("Pixel size source: file header")
+        elif self.image_processor.has_image():
+            label.setText(f"No pixel size in file - using '{AUTO_FALLBACK_PRESET}' preset. Pick a preset to override.")
+        else:
+            label.setText(f"Pixel size source: file header if available, else '{AUTO_FALLBACK_PRESET}' preset")
 
     def _get_mode_dependent_unit(self, preset_name: str) -> str | None:
         """Return the measurement/scalebar unit associated with the active image mode."""
+        if preset_name == AUTO_PRESET_LABEL:
+            defaults = self._resolve_auto_calibration()[1]
+            return defaults["unit"] if defaults is not None else None
         defaults = get_mode_overlay_defaults(preset_name)
         if defaults is not None:
             return defaults["unit"]
@@ -752,6 +832,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
     def _get_mode_dependent_scalebar_defaults(self, preset_name: str) -> dict | None:
         """Compatibility wrapper around shared imaging-mode overlay defaults."""
+        if preset_name == AUTO_PRESET_LABEL:
+            return self._resolve_auto_calibration()[1]
         return get_mode_overlay_defaults(preset_name)
 
     def _refresh_scale_information(self):
@@ -1654,8 +1736,9 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             self.presets["Custom"] = default_custom_value
         current = self.preset_combo.currentText() if self.preset_combo.count() > 0 else None
         self.preset_combo.clear()
+        self.preset_combo.addItem(AUTO_PRESET_LABEL)
         self.preset_combo.addItems(sorted(self.presets.keys()))
-        if current and current in self.presets:
+        if current and (current in self.presets or current == AUTO_PRESET_LABEL):
             self.preset_combo.setCurrentText(current)
         if hasattr(self, "pixel_size_spinbox") and hasattr(self, "pixel_size_unit_combo"):
             self._update_pixel_size_editable_state(self.preset_combo.currentText())
@@ -1668,13 +1751,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     
     def _apply_initial_scalebar_defaults(self):
         """Apply initial scalebar defaults for the default preset."""
-        current_preset = self.preset_combo.currentText()
-        defaults = self._get_mode_dependent_scalebar_defaults(current_preset)
-        if defaults is None:
-            return
-        self.unit_combo.setCurrentText(defaults["unit"])
-        self.scalebar_length_spinbox.setValue(defaults["scalebar_length_value"])
-        self.scalebar_length_text_raw = defaults["scalebar_length_text"]
+        # Applies pixel size, unit and scalebar defaults for the active preset (or Auto)
+        self.on_preset_changed(self.preset_combo.currentText())
     
     def resizeEvent(self, event):
         """Handle window resize."""
