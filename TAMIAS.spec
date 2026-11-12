@@ -39,6 +39,7 @@ a = Analysis(
         'core.diffraction',
         'core.overlay_renderer',
         'rodhypix',
+        'version',
         'gui.app_state_manager',
         'gui.batch_processing_dialog',
         'gui.collapsible_box',

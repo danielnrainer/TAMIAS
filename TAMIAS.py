@@ -61,6 +61,10 @@ from gui import ui_sections
 from gui.collapsible_box import QCollapsibleBox
 from gui.crop_controller import CropControllerMixin
 from gui.batch_processing_dialog import BatchProcessingDialog
+from version import (
+    __version__, APP_NAME, APP_FULL_NAME, APP_AUTHOR, APP_COPYRIGHT,
+    LICENSE_NAME, GITHUB_URL, ZENODO_URL,
+)
 
 
 def get_resource_path(relative_path: str) -> Path:
@@ -410,13 +414,13 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
     def show_about_dialog(self):
         """Show app information and citation links in a compact custom dialog."""
-        github_url = "https://github.com/danielnrainer/TAMIAS"
-        zenodo_url = "https://doi.org/10.5281/zenodo.20403971"
+        github_url = GITHUB_URL
+        zenodo_url = ZENODO_URL
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("About TAMIAS")
+        dialog.setWindowTitle(f"About {APP_NAME}")
         dialog.setModal(True)
-        dialog.resize(550, 200)
+        dialog.resize(560, 260)
 
         root_layout = QHBoxLayout(dialog)
 
@@ -441,9 +445,12 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
         right_panel = QVBoxLayout()
 
-        title_label = QLabel("<b>TAMIAS</b>")
-        subtitle_label = QLabel("Tool for Annotation and Markup of Images from a Synergy-ED")
+        title_label = QLabel(f"<b>{APP_NAME}</b> &nbsp; Version {__version__}")
+        subtitle_label = QLabel(APP_FULL_NAME)
         subtitle_label.setWordWrap(True)
+
+        author_label = QLabel(f"<b>Author:</b> {APP_AUTHOR}<br>{APP_COPYRIGHT}<br>Licensed under the {LICENSE_NAME}")
+        author_label.setWordWrap(True)
 
         github_label = QLabel(f"GitHub: <a href='{github_url}'>{github_url}</a>")
         github_label.setOpenExternalLinks(True)
@@ -463,6 +470,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
         right_panel.addWidget(title_label)
         right_panel.addWidget(subtitle_label)
+        right_panel.addSpacing(6)
+        right_panel.addWidget(author_label)
         right_panel.addSpacing(6)
         right_panel.addWidget(github_label)
         right_panel.addWidget(zenodo_label)
@@ -745,6 +754,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         """Reset overlays that depend on source image geometry."""
         if disable_scalebar:
             self.scalebar_checkbox.setChecked(False)
+            self.aperture_checkbox.setChecked(False)
         self.overlay_renderer.scalebar_offset = (0.0, 0.0)
         if hasattr(self, 'position_combo'):
             self.position_combo.blockSignals(True)
