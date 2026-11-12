@@ -14,7 +14,7 @@ class SmartDoubleSpinBox(QDoubleSpinBox):
         try:
             if abs(value - round(value)) < 1e-9:
                 return str(int(round(value)))
-            return (f"{value:.2f}").rstrip("0").rstrip(".")
+            return (f"{value:.{self.decimals()}f}").rstrip("0").rstrip(".")
         except Exception:
             return super().textFromValue(value)
 

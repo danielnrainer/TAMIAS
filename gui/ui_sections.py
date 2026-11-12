@@ -7,6 +7,7 @@ from typing import Any
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QAbstractItemView,
+    QListWidget,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -16,8 +17,11 @@ from qtpy.QtWidgets import (
     QSlider,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
+from core.diffraction import COMMON_ACCELERATING_VOLTAGES_KV
+from core.image_processor import ImageProcessor
 from gui.collapsible_box import QCollapsibleBox
 from utils.imaging_mode_defaults import AUTO_PRESET_LABEL
 from gui.custom_widgets import ClickClearTableWidget, SmartDoubleSpinBox, set_color_button_indicator
@@ -71,6 +75,7 @@ def setup_preset_controls(editor: Any, parent_layout):
     editor._update_calibration_source_label()
 
     preset_box.setContentLayout(preset_layout)
+    editor.preset_box = preset_box
     parent_layout.addWidget(preset_box)
 
 
@@ -78,6 +83,18 @@ def setup_brightness_contrast_controls(editor: Any, parent_layout):
     """Setup brightness/contrast controls on the main editor."""
     bc_box = QCollapsibleBox("Brightness/Contrast", expanded=False)
     bc_layout = QVBoxLayout()
+
+    scaling_layout = QHBoxLayout()
+    scaling_layout.addWidget(QLabel("Intensity scaling:"))
+    editor.intensity_scaling_combo = QComboBox()
+    editor.intensity_scaling_combo.addItems(list(ImageProcessor.INTENSITY_SCALING_MODES))
+    editor.intensity_scaling_combo.setToolTip(
+        "How raw detector counts are mapped to display grey levels.\n"
+        "Logarithmic or Square root reveal weak reflections next to the intense direct beam."
+    )
+    editor.intensity_scaling_combo.currentTextChanged.connect(editor.on_intensity_scaling_changed)
+    scaling_layout.addWidget(editor.intensity_scaling_combo)
+    bc_layout.addLayout(scaling_layout)
 
     auto_btn = QPushButton("Auto Adjust")
     auto_btn.clicked.connect(editor.auto_adjust)
@@ -151,7 +168,7 @@ def setup_scalebar_controls(editor: Any, parent_layout):
     length_layout = QHBoxLayout()
     length_layout.addWidget(QLabel("Length:"))
     editor.scalebar_length_spinbox = SmartDoubleSpinBox()
-    editor.scalebar_length_spinbox.setDecimals(2)
+    editor.scalebar_length_spinbox.setDecimals(3)
     editor.scalebar_length_spinbox.setSingleStep(0.1)
     editor.scalebar_length_spinbox.setRange(0.01, 10000.0)
     editor.scalebar_length_spinbox.setValue(100.0)
@@ -274,12 +291,13 @@ def setup_aperture_controls(editor: Any, parent_layout):
     aperture_layout.addLayout(aperture_color_layout)
 
     aperture_box.setContentLayout(aperture_layout)
+    editor.aperture_box = aperture_box
     parent_layout.addWidget(aperture_box)
 
 
 def setup_measurement_controls(editor: Any, parent_layout):
     """Setup particle measurement controls on the main editor."""
-    measurement_box = QCollapsibleBox("Particle Measurement", expanded=False)
+    measurement_box = QCollapsibleBox("Measurement", expanded=False)
     measurement_layout = QVBoxLayout()
 
     editor.measurement_checkbox = QCheckBox("Show Measurement Annotations")
@@ -300,6 +318,26 @@ def setup_measurement_controls(editor: Any, parent_layout):
     editor.draw_measurement_btn.toggled.connect(editor.on_draw_mode_toggled)
     measurement_layout.addWidget(editor.draw_measurement_btn)
 
+    editor.diffraction_measure_widget = QWidget()
+    diff_measure_layout = QVBoxLayout(editor.diffraction_measure_widget)
+    diff_measure_layout.setContentsMargins(0, 0, 0, 0)
+    editor.measure_from_center_checkbox = QCheckBox("Start lines at beam centre")
+    editor.measure_from_center_checkbox.setChecked(True)
+    editor.measure_from_center_checkbox.setToolTip(
+        "Diffraction: new lines start at the beam centre (and follow it if it is moved), "
+        "so the label gives the resolution of the reflection at the end point."
+    )
+    diff_measure_layout.addWidget(editor.measure_from_center_checkbox)
+    editor.snap_measurement_end_checkbox = QCheckBox("Snap end to nearest peak")
+    editor.snap_measurement_end_checkbox.setChecked(False)
+    editor.snap_measurement_end_checkbox.setToolTip(
+        "Diffraction: move the end point to the intensity-weighted centre of the brightest "
+        "spot within 15 px of where the mouse is released."
+    )
+    diff_measure_layout.addWidget(editor.snap_measurement_end_checkbox)
+    measurement_layout.addWidget(editor.diffraction_measure_widget)
+    editor.diffraction_measure_widget.setVisible(False)
+
     editor.move_line_btn = QPushButton("↔  Move Line")
     editor.move_line_btn.setCheckable(True)
     editor.move_line_btn.setToolTip(
@@ -317,7 +355,8 @@ def setup_measurement_controls(editor: Any, parent_layout):
     measurement_layout.addWidget(editor.move_label_btn)
 
     unit_layout = QHBoxLayout()
-    unit_layout.addWidget(QLabel("Length Unit:"))
+    editor.measurement_unit_label = QLabel("Length Unit:")
+    unit_layout.addWidget(editor.measurement_unit_label)
     editor.measurement_unit_combo = QComboBox()
     editor.measurement_unit_combo.addItems(["nm", "µm"])
     editor.measurement_unit_combo.currentTextChanged.connect(editor.on_measurement_changed)
@@ -421,3 +460,234 @@ def setup_measurement_controls(editor: Any, parent_layout):
     measurement_box.setContentLayout(measurement_layout)
     measurement_box.toggleButton.toggled.connect(editor._on_measurement_section_toggled)
     parent_layout.addWidget(measurement_box)
+
+
+IMAGE_TYPE_LABELS = {
+    "real": "Real space image",
+    "diffraction": "Diffraction pattern",
+}
+
+
+def setup_image_type_controls(editor: Any, parent_layout):
+    """Image type selector (real-space image vs diffraction pattern), always visible."""
+    type_layout = QHBoxLayout()
+    type_layout.addWidget(QLabel("Image type:"))
+    editor.image_type_combo = QComboBox()
+    for key, label in IMAGE_TYPE_LABELS.items():
+        editor.image_type_combo.addItem(label, key)
+    editor.image_type_combo.setToolTip(
+        "Real space: calibrated in nm/µm per pixel.\n"
+        "Diffraction pattern: reciprocal space, calibrated from camera length, wavelength and "
+        "detector pixel size."
+    )
+    editor.image_type_combo.currentIndexChanged.connect(editor.on_image_type_combo_changed)
+    type_layout.addWidget(editor.image_type_combo, 1)
+    parent_layout.addLayout(type_layout)
+
+    hint_layout = QHBoxLayout()
+    editor.image_type_hint_label = QLabel("")
+    editor.image_type_hint_label.setWordWrap(True)
+    editor.image_type_hint_label.setStyleSheet("font-style: italic")
+    hint_layout.addWidget(editor.image_type_hint_label, 1)
+    editor.image_type_hint_btn = QPushButton("Switch")
+    editor.image_type_hint_btn.clicked.connect(editor.on_image_type_hint_clicked)
+    hint_layout.addWidget(editor.image_type_hint_btn)
+    parent_layout.addLayout(hint_layout)
+    editor.image_type_hint_label.setVisible(False)
+    editor.image_type_hint_btn.setVisible(False)
+
+
+def _make_spinbox(minimum: float, maximum: float, decimals: int, step: float, suffix: str = "") -> QDoubleSpinBox:
+    spin = QDoubleSpinBox()
+    spin.setRange(minimum, maximum)
+    spin.setDecimals(decimals)
+    spin.setSingleStep(step)
+    spin.setKeyboardTracking(False)
+    if suffix:
+        spin.setSuffix(suffix)
+    return spin
+
+
+def setup_diffraction_calibration_controls(editor: Any, parent_layout):
+    """Calibration of diffraction patterns: camera length, wavelength, pixel size, beam centre."""
+    box = QCollapsibleBox("Diffraction Calibration", expanded=False)
+    layout = QVBoxLayout()
+
+    editor.diffraction_use_header_checkbox = QCheckBox("Use file header values where available")
+    editor.diffraction_use_header_checkbox.setToolTip(
+        "Take camera length (detector distance), wavelength, detector pixel size and beam centre "
+        "from the .rodhypix header. Untick to enter your own values."
+    )
+    editor.diffraction_use_header_checkbox.toggled.connect(editor.on_diffraction_use_header_toggled)
+    layout.addWidget(editor.diffraction_use_header_checkbox)
+
+    cl_layout = QHBoxLayout()
+    cl_layout.addWidget(QLabel("Camera length:"))
+    editor.camera_length_spinbox = _make_spinbox(1.0, 100000.0, 1, 1.0, " mm")
+    editor.camera_length_spinbox.valueChanged.connect(editor.on_diffraction_parameter_changed)
+    cl_layout.addWidget(editor.camera_length_spinbox)
+    layout.addLayout(cl_layout)
+
+    wl_layout = QHBoxLayout()
+    wl_layout.addWidget(QLabel("Wavelength:"))
+    editor.wavelength_spinbox = _make_spinbox(0.00001, 10.0, 5, 0.0001, " Å")
+    editor.wavelength_spinbox.valueChanged.connect(editor.on_diffraction_parameter_changed)
+    wl_layout.addWidget(editor.wavelength_spinbox)
+    editor.voltage_combo = QComboBox()
+    editor.voltage_combo.addItem("From kV…", None)
+    for kv in COMMON_ACCELERATING_VOLTAGES_KV:
+        editor.voltage_combo.addItem(f"{kv} kV", float(kv))
+    editor.voltage_combo.setToolTip("Set the relativistic electron wavelength for an accelerating voltage")
+    editor.voltage_combo.activated.connect(editor.on_voltage_preset_selected)
+    wl_layout.addWidget(editor.voltage_combo)
+    layout.addLayout(wl_layout)
+
+    px_layout = QHBoxLayout()
+    px_layout.addWidget(QLabel("Detector pixel size:"))
+    editor.detector_pixel_spinbox = _make_spinbox(0.01, 10000.0, 2, 1.0, " µm")
+    editor.detector_pixel_spinbox.valueChanged.connect(editor.on_diffraction_parameter_changed)
+    px_layout.addWidget(editor.detector_pixel_spinbox)
+    layout.addLayout(px_layout)
+
+    editor.diffraction_source_label = QLabel("")
+    editor.diffraction_source_label.setWordWrap(True)
+    editor.diffraction_source_label.setStyleSheet("font-style: italic")
+    layout.addWidget(editor.diffraction_source_label)
+
+    layout.addWidget(QLabel("Beam centre (px):"))
+    bc_layout = QHBoxLayout()
+    bc_layout.addWidget(QLabel("X"))
+    editor.beam_center_x_spinbox = _make_spinbox(-100000.0, 100000.0, 1, 0.5)
+    editor.beam_center_x_spinbox.valueChanged.connect(editor.on_beam_center_spinbox_changed)
+    bc_layout.addWidget(editor.beam_center_x_spinbox)
+    bc_layout.addWidget(QLabel("Y"))
+    editor.beam_center_y_spinbox = _make_spinbox(-100000.0, 100000.0, 1, 0.5)
+    editor.beam_center_y_spinbox.valueChanged.connect(editor.on_beam_center_spinbox_changed)
+    bc_layout.addWidget(editor.beam_center_y_spinbox)
+    layout.addLayout(bc_layout)
+
+    bc_btn_layout = QHBoxLayout()
+    editor.pick_beam_center_btn = QPushButton("⌖  Pick on Image")
+    editor.pick_beam_center_btn.setCheckable(True)
+    editor.pick_beam_center_btn.setToolTip("Click the direct beam (or the centre of the pattern) on the image")
+    editor.pick_beam_center_btn.toggled.connect(editor.on_beam_center_pick_toggled)
+    bc_btn_layout.addWidget(editor.pick_beam_center_btn)
+    editor.reset_beam_center_btn = QPushButton("Reset")
+    editor.reset_beam_center_btn.setToolTip("Reset to the header beam position, or the image centre if there is none")
+    editor.reset_beam_center_btn.clicked.connect(editor.reset_beam_center)
+    bc_btn_layout.addWidget(editor.reset_beam_center_btn)
+    layout.addLayout(bc_btn_layout)
+
+    editor.snap_beam_center_checkbox = QCheckBox("Snap to nearby intensity peak")
+    editor.snap_beam_center_checkbox.setToolTip(
+        "When picking, refine the click to the intensity-weighted centre of the brightest "
+        "spot within 15 px (useful for an unblocked direct beam)."
+    )
+    editor.snap_beam_center_checkbox.setChecked(True)
+    layout.addWidget(editor.snap_beam_center_checkbox)
+
+    editor.diffraction_info_label = QLabel("")
+    editor.diffraction_info_label.setWordWrap(True)
+    editor.diffraction_info_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    layout.addWidget(editor.diffraction_info_label)
+
+    box.setContentLayout(layout)
+    box.toggleButton.toggled.connect(editor._on_diffraction_section_toggled)
+    editor.diffraction_box = box
+    parent_layout.addWidget(box)
+
+
+def setup_resolution_ring_controls(editor: Any, parent_layout):
+    """Resolution ring overlay controls (diffraction mode replacement for the aperture overlay)."""
+    box = QCollapsibleBox("Resolution Rings", expanded=False)
+    layout = QVBoxLayout()
+
+    editor.rings_checkbox = QCheckBox("Show Resolution Rings")
+    editor.rings_checkbox.stateChanged.connect(editor.on_rings_toggled)
+    layout.addWidget(editor.rings_checkbox)
+
+    editor.ring_labels_checkbox = QCheckBox("Label rings with resolution")
+    editor.ring_labels_checkbox.setChecked(bool(editor.overlay_renderer.ring_show_labels))
+    editor.ring_labels_checkbox.stateChanged.connect(editor.on_ring_style_changed)
+    layout.addWidget(editor.ring_labels_checkbox)
+
+    editor.beam_marker_checkbox = QCheckBox("Mark beam centre")
+    editor.beam_marker_checkbox.setChecked(bool(editor.overlay_renderer.beam_center_marker_enabled))
+    editor.beam_marker_checkbox.stateChanged.connect(editor.on_ring_style_changed)
+    layout.addWidget(editor.beam_marker_checkbox)
+
+    layout.addWidget(QLabel("Rings (d-spacing, tick to show):"))
+    editor.ring_list = QListWidget()
+    editor.ring_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+    editor.ring_list.setMaximumHeight(130)
+    editor.ring_list.itemChanged.connect(editor.on_ring_item_changed)
+    layout.addWidget(editor.ring_list)
+
+    add_layout = QHBoxLayout()
+    editor.ring_add_spinbox = _make_spinbox(0.01, 1000.0, 3, 0.1, " Å")
+    editor.ring_add_spinbox.setValue(1.5)
+    add_layout.addWidget(editor.ring_add_spinbox)
+    add_btn = QPushButton("Add Ring")
+    add_btn.clicked.connect(editor.add_resolution_ring)
+    add_layout.addWidget(add_btn)
+    layout.addLayout(add_layout)
+
+    list_btn_layout = QHBoxLayout()
+    remove_btn = QPushButton("Remove Selected")
+    remove_btn.clicked.connect(editor.remove_selected_resolution_rings)
+    list_btn_layout.addWidget(remove_btn)
+    restore_btn = QPushButton("Restore Presets")
+    restore_btn.setToolTip("Reset the list to 0.8, 1.0, 1.2 and 2.0 Å")
+    restore_btn.clicked.connect(editor.restore_resolution_ring_presets)
+    list_btn_layout.addWidget(restore_btn)
+    layout.addLayout(list_btn_layout)
+
+    style_layout = QHBoxLayout()
+    style_layout.addWidget(QLabel("Line width (px):"))
+    editor.ring_width_spinbox = QSpinBox()
+    editor.ring_width_spinbox.setRange(1, 20)
+    editor.ring_width_spinbox.setValue(int(editor.overlay_renderer.ring_line_width))
+    editor.ring_width_spinbox.valueChanged.connect(editor.on_ring_style_changed)
+    style_layout.addWidget(editor.ring_width_spinbox)
+    layout.addLayout(style_layout)
+
+    color_layout = QHBoxLayout()
+    color_layout.addWidget(QLabel("Ring color:"))
+    editor.ring_color_btn = QPushButton("Choose Color...")
+    editor.ring_color_btn.clicked.connect(editor.choose_ring_color)
+    set_color_button_indicator(editor.ring_color_btn, editor.overlay_renderer.ring_color)
+    color_layout.addWidget(editor.ring_color_btn)
+    layout.addLayout(color_layout)
+
+    ring_font_layout = QHBoxLayout()
+    editor.ring_font_label = QLabel("")
+    ring_font_layout.addWidget(editor.ring_font_label)
+    ring_font_btn = QPushButton("Choose Font…")
+    ring_font_btn.clicked.connect(editor.choose_ring_font)
+    ring_font_layout.addWidget(ring_font_btn)
+    layout.addLayout(ring_font_layout)
+    editor._update_ring_font_label()
+
+    ring_label_btn_layout = QHBoxLayout()
+    editor.move_ring_label_btn = QPushButton("☰  Move Ring Labels")
+    editor.move_ring_label_btn.setCheckable(True)
+    editor.move_ring_label_btn.setToolTip("Click and drag a ring label to reposition it")
+    editor.move_ring_label_btn.toggled.connect(editor.on_ring_label_drag_mode_toggled)
+    ring_label_btn_layout.addWidget(editor.move_ring_label_btn)
+    reset_ring_labels_btn = QPushButton("Reset Positions")
+    reset_ring_labels_btn.setToolTip("Return all ring labels to automatic placement")
+    reset_ring_labels_btn.clicked.connect(editor.reset_ring_label_positions)
+    ring_label_btn_layout.addWidget(reset_ring_labels_btn)
+    layout.addLayout(ring_label_btn_layout)
+
+    editor.ring_info_label = QLabel(
+        "Ring radius from Bragg's law on a flat detector: R = L·tan(2θ), sin θ = λ/(2d)."
+    )
+    editor.ring_info_label.setWordWrap(True)
+    editor.ring_info_label.setStyleSheet("font-style: italic")
+    layout.addWidget(editor.ring_info_label)
+
+    box.setContentLayout(layout)
+    box.toggleButton.toggled.connect(editor._on_rings_section_toggled)
+    editor.rings_box = box
+    parent_layout.addWidget(box)

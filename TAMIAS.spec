@@ -36,6 +36,7 @@ a = Analysis(
         f'{qt_backend}.QtWidgets',
         'core.image_processor',
         'core.crop_geometry',
+        'core.diffraction',
         'core.overlay_renderer',
         'rodhypix',
         'gui.app_state_manager',

@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMessageBox,
     QPushButton,
@@ -29,6 +30,11 @@ from qtpy.QtWidgets import (
     QColorDialog,
 )
 
+from core.diffraction import (
+    RECIPROCAL_ANGSTROM,
+    RECIPROCAL_UNITS,
+    DiffractionGeometry,
+)
 from core.image_processor import ImageProcessor
 from core.overlay_renderer import OverlayRenderer, qimage_to_rgba_array
 from gui.collapsible_box import QCollapsibleBox
@@ -52,6 +58,8 @@ class BatchProcessingDialog(QDialog):
         initial_output_directory: str = "",
         default_crop_top_rows: int = 10,
         default_crop_bottom_rows: int = 9,
+        image_type: str = "real",
+        diffraction_defaults: dict | None = None,
     ):
         super().__init__(parent)
         self.setWindowTitle("Batch Processing")
@@ -65,6 +73,8 @@ class BatchProcessingDialog(QDialog):
         self.last_output_directory = str(initial_output_directory or "")
         self.default_crop_top_rows = max(0, int(default_crop_top_rows))
         self.default_crop_bottom_rows = max(0, int(default_crop_bottom_rows))
+        self.initial_image_type = "diffraction" if str(image_type) == "diffraction" else "real"
+        self.diffraction_defaults = dict(diffraction_defaults or {})
 
         self._setup_ui()
 
@@ -107,6 +117,20 @@ class BatchProcessingDialog(QDialog):
         params_group = QGroupBox("Annotation Parameters")
         params_layout = QVBoxLayout()
 
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(QLabel("Image type:"))
+        self.image_type_combo = QComboBox()
+        self.image_type_combo.addItem("Real space image", "real")
+        self.image_type_combo.addItem("Diffraction pattern", "diffraction")
+        type_layout.addWidget(self.image_type_combo)
+        params_layout.addLayout(type_layout)
+
+        # Real-space calibration widgets (hidden for diffraction patterns)
+        self.real_calibration_widget = QWidget()
+        real_layout = QVBoxLayout(self.real_calibration_widget)
+        real_layout.setContentsMargins(0, 0, 0, 0)
+        params_layout.addWidget(self.real_calibration_widget)
+
         preset_layout = QHBoxLayout()
         preset_layout.addWidget(QLabel("Imaging mode:"))
         self.preset_combo = QComboBox()
@@ -115,7 +139,7 @@ class BatchProcessingDialog(QDialog):
         self.preset_combo.setCurrentText(AUTO_PRESET_LABEL)
         self.preset_combo.currentTextChanged.connect(self._on_preset_changed)
         preset_layout.addWidget(self.preset_combo)
-        params_layout.addLayout(preset_layout)
+        real_layout.addLayout(preset_layout)
 
         # Only relevant in Auto mode: preset used for files without a header pixel size
         fallback_layout = QHBoxLayout()
@@ -128,7 +152,7 @@ class BatchProcessingDialog(QDialog):
         self.fallback_combo.currentTextChanged.connect(self._on_preset_changed)
         fallback_layout.addWidget(self.fallback_combo)
         self.fallback_widgets = [self.fallback_label, self.fallback_combo]
-        params_layout.addLayout(fallback_layout)
+        real_layout.addLayout(fallback_layout)
 
         pixel_layout = QHBoxLayout()
         self.pixel_size_label = QLabel("Pixel size:")
@@ -142,7 +166,7 @@ class BatchProcessingDialog(QDialog):
         self.pixel_unit_combo = QComboBox()
         self.pixel_unit_combo.addItems(["nm", "µm"])
         pixel_layout.addWidget(self.pixel_unit_combo)
-        params_layout.addLayout(pixel_layout)
+        real_layout.addLayout(pixel_layout)
 
         self.auto_info_label = QLabel(
             "Auto: each .rodhypix file's header pixel size is used; files without one "
@@ -150,7 +174,64 @@ class BatchProcessingDialog(QDialog):
         )
         self.auto_info_label.setWordWrap(True)
         self.auto_info_label.setStyleSheet("font-style: italic")
-        params_layout.addWidget(self.auto_info_label)
+        real_layout.addWidget(self.auto_info_label)
+
+        # Diffraction calibration (shown for diffraction patterns only)
+        dd = self.diffraction_defaults
+        diff_box = QCollapsibleBox("Diffraction Calibration", expanded=False)
+        self.batch_diffraction_box = diff_box
+        diff_layout = QVBoxLayout()
+
+        self.diff_use_header_checkbox = QCheckBox("Use file header values where available")
+        self.diff_use_header_checkbox.setChecked(bool(dd.get("use_header", True)))
+        diff_layout.addWidget(self.diff_use_header_checkbox)
+
+        def _float_default(key: str, fallback: float) -> float:
+            try:
+                value = float(dd.get(key, fallback))
+            except (TypeError, ValueError):
+                return fallback
+            return value if value > 0 else fallback
+
+        cl_layout = QHBoxLayout()
+        cl_layout.addWidget(QLabel("Camera length (mm):"))
+        self.diff_camera_length_spinbox = QDoubleSpinBox()
+        self.diff_camera_length_spinbox.setRange(0.1, 100000.0)
+        self.diff_camera_length_spinbox.setDecimals(1)
+        self.diff_camera_length_spinbox.setValue(_float_default("camera_length_mm", 650.0))
+        cl_layout.addWidget(self.diff_camera_length_spinbox)
+        diff_layout.addLayout(cl_layout)
+
+        wl_layout = QHBoxLayout()
+        wl_layout.addWidget(QLabel("Wavelength (Å):"))
+        self.diff_wavelength_spinbox = QDoubleSpinBox()
+        self.diff_wavelength_spinbox.setRange(0.00001, 10.0)
+        self.diff_wavelength_spinbox.setDecimals(5)
+        self.diff_wavelength_spinbox.setSingleStep(0.0001)
+        self.diff_wavelength_spinbox.setValue(_float_default("wavelength_angstrom", 0.02508))
+        wl_layout.addWidget(self.diff_wavelength_spinbox)
+        diff_layout.addLayout(wl_layout)
+
+        px_layout = QHBoxLayout()
+        px_layout.addWidget(QLabel("Detector pixel size (µm):"))
+        self.diff_pixel_size_spinbox = QDoubleSpinBox()
+        self.diff_pixel_size_spinbox.setRange(0.01, 10000.0)
+        self.diff_pixel_size_spinbox.setDecimals(2)
+        self.diff_pixel_size_spinbox.setValue(_float_default("pixel_size_um", 100.0))
+        px_layout.addWidget(self.diff_pixel_size_spinbox)
+        diff_layout.addLayout(px_layout)
+
+        diff_info = QLabel(
+            "Values above are fallbacks for files without header values (e.g. TIFF), or are "
+            "used for all files when the header option is off. Beam centre: the header beam "
+            "origin (shifted by the crop below) if present, otherwise the image centre."
+        )
+        diff_info.setWordWrap(True)
+        diff_info.setStyleSheet("font-style: italic")
+        diff_layout.addWidget(diff_info)
+
+        diff_box.setContentLayout(diff_layout)
+        params_layout.addWidget(diff_box)
 
         crop_box = QCollapsibleBox("Image Cropping", expanded=False)
         self.batch_crop_box = crop_box
@@ -187,6 +268,17 @@ class BatchProcessingDialog(QDialog):
         self.auto_bc_checkbox.setChecked(True)
         params_layout.addWidget(self.auto_bc_checkbox)
 
+        scaling_layout = QHBoxLayout()
+        scaling_layout.addWidget(QLabel("Intensity scaling:"))
+        self.intensity_scaling_combo = QComboBox()
+        self.intensity_scaling_combo.addItems(list(ImageProcessor.INTENSITY_SCALING_MODES))
+        self.intensity_scaling_combo.setToolTip(
+            "Mapping from raw counts to display brightness. Logarithmic suits diffraction "
+            "patterns (very bright direct beam, weak reflections)."
+        )
+        scaling_layout.addWidget(self.intensity_scaling_combo)
+        params_layout.addLayout(scaling_layout)
+
         scalebar_group = QCollapsibleBox("Scalebar", expanded=False)
         self.batch_scalebar_box = scalebar_group
         scalebar_layout = QVBoxLayout()
@@ -199,7 +291,7 @@ class BatchProcessingDialog(QDialog):
         length_layout = QHBoxLayout()
         length_layout.addWidget(QLabel("Length:"))
         self.scalebar_length_spinbox = SmartDoubleSpinBox()
-        self.scalebar_length_spinbox.setDecimals(2)
+        self.scalebar_length_spinbox.setDecimals(3)
         self.scalebar_length_spinbox.setSingleStep(0.1)
         self.scalebar_length_spinbox.setRange(0.01, 10000.0)
         self.scalebar_length_spinbox.setValue(5.0)
@@ -298,6 +390,48 @@ class BatchProcessingDialog(QDialog):
         aperture_group.setContentLayout(aperture_layout)
         params_layout.addWidget(aperture_group)
 
+        rings_group = QCollapsibleBox("Resolution Rings", expanded=False)
+        self.batch_rings_box = rings_group
+        rings_layout = QVBoxLayout()
+
+        self.rings_checkbox = QCheckBox("Add resolution rings")
+        self.rings_checkbox.setChecked(bool(getattr(self.renderer, "rings_enabled", False)))
+        self.rings_checkbox.stateChanged.connect(self._update_batch_section_titles)
+        rings_layout.addWidget(self.rings_checkbox)
+
+        rings_layout.addWidget(QLabel("Resolutions (d-spacing in Å, comma-separated):"))
+        initial_rings = []
+        for entry in getattr(self.renderer, "ring_resolutions", []) or []:
+            try:
+                if bool(entry.get("enabled", True)):
+                    initial_rings.append(f"{float(entry.get('d')):g}")
+            except (TypeError, ValueError, AttributeError):
+                continue
+        self.rings_edit = QLineEdit(", ".join(initial_rings) if initial_rings else "0.8, 1.0, 1.2, 2.0")
+        self.rings_edit.setPlaceholderText("e.g. 0.8, 1.0, 1.2, 2.0")
+        rings_layout.addWidget(self.rings_edit)
+
+        ring_style_layout = QHBoxLayout()
+        ring_style_layout.addWidget(QLabel("Color:"))
+        self.ring_color_btn = QPushButton("Choose...")
+        self.ring_color = QColor(getattr(self.renderer, "ring_color", QColor(0, 255, 255)))
+        self.ring_color_btn.clicked.connect(self._choose_ring_color)
+        set_color_button_indicator(self.ring_color_btn, self.ring_color)
+        ring_style_layout.addWidget(self.ring_color_btn)
+        ring_style_layout.addWidget(QLabel("Width (px):"))
+        self.ring_width_spinbox = QSpinBox()
+        self.ring_width_spinbox.setRange(1, 20)
+        self.ring_width_spinbox.setValue(int(getattr(self.renderer, "ring_line_width", 2)))
+        ring_style_layout.addWidget(self.ring_width_spinbox)
+        rings_layout.addLayout(ring_style_layout)
+
+        self.ring_labels_checkbox = QCheckBox("Show resolution labels")
+        self.ring_labels_checkbox.setChecked(bool(getattr(self.renderer, "ring_show_labels", True)))
+        rings_layout.addWidget(self.ring_labels_checkbox)
+
+        rings_group.setContentLayout(rings_layout)
+        params_layout.addWidget(rings_group)
+
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
 
@@ -361,6 +495,95 @@ class BatchProcessingDialog(QDialog):
         self._update_batch_section_titles()
         self._on_preset_changed(AUTO_PRESET_LABEL)
 
+        # Per-image-type scalebar state (value, unit) restored when switching types.
+        self._real_scalebar_state = (
+            float(self.scalebar_length_spinbox.value()),
+            self.scalebar_unit_combo.currentText(),
+        )
+        recip_unit = getattr(self.renderer, "recip_scalebar_unit", RECIPROCAL_ANGSTROM)
+        if recip_unit not in RECIPROCAL_UNITS:
+            recip_unit = RECIPROCAL_ANGSTROM
+        self._recip_scalebar_state = (
+            float(getattr(self.renderer, "recip_scalebar_length_value", 0.5)),
+            recip_unit,
+        )
+        self._active_image_type = "real"
+        self.image_type_combo.currentIndexChanged.connect(self._on_image_type_changed)
+        target_index = self.image_type_combo.findData(self.initial_image_type)
+        if target_index > 0:
+            self.image_type_combo.setCurrentIndex(target_index)  # triggers _on_image_type_changed
+        else:
+            self._on_image_type_changed()
+
+        initial_scaling = str(self.diffraction_defaults.get("intensity_scaling", ""))
+        if self._is_diffraction() and initial_scaling in ImageProcessor.INTENSITY_SCALING_MODES:
+            self.intensity_scaling_combo.setCurrentText(initial_scaling)
+
+    def _is_diffraction(self) -> bool:
+        return self.image_type_combo.currentData() == "diffraction"
+
+    def _on_image_type_changed(self, _index: int = 0):
+        """Swap calibration/overlay sections, scalebar units and default scaling."""
+        diffraction = self._is_diffraction()
+        new_type = "diffraction" if diffraction else "real"
+
+        self.real_calibration_widget.setVisible(not diffraction)
+        self.batch_aperture_box.setVisible(not diffraction)
+        self.batch_diffraction_box.setVisible(diffraction)
+        self.batch_rings_box.setVisible(diffraction)
+
+        if new_type != self._active_image_type:
+            current_state = (
+                float(self.scalebar_length_spinbox.value()),
+                self.scalebar_unit_combo.currentText(),
+            )
+            if self._active_image_type == "diffraction":
+                self._recip_scalebar_state = current_state
+            else:
+                self._real_scalebar_state = current_state
+            self._active_image_type = new_type
+
+        value, unit = self._recip_scalebar_state if diffraction else self._real_scalebar_state
+        units = list(RECIPROCAL_UNITS) if diffraction else ["nm", "µm"]
+        self.scalebar_unit_combo.blockSignals(True)
+        self.scalebar_unit_combo.clear()
+        self.scalebar_unit_combo.addItems(units)
+        self.scalebar_unit_combo.setCurrentText(unit if unit in units else units[0])
+        self.scalebar_unit_combo.blockSignals(False)
+        self.scalebar_length_spinbox.setValue(float(value))
+        # A raw label typed for the other image type must not leak into this one.
+        self._batch_scalebar_length_text_raw = None
+
+        self.intensity_scaling_combo.setCurrentText("Logarithmic" if diffraction else "Linear")
+        self._update_batch_section_titles()
+
+    def _choose_ring_color(self):
+        color = QColorDialog.getColor(self.ring_color, self, "Choose Resolution Ring Color")
+        if color.isValid():
+            self.ring_color = color
+            set_color_button_indicator(self.ring_color_btn, self.ring_color)
+
+    def _parse_ring_resolutions(self) -> tuple[list[float], list[str]]:
+        """Parse the ring d-spacing list. Returns (valid values in Å, invalid tokens)."""
+        values: list[float] = []
+        invalid: list[str] = []
+        text = self.rings_edit.text().replace(";", ",")
+        for token in text.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                value = float(token)
+            except ValueError:
+                invalid.append(token)
+                continue
+            if not np.isfinite(value) or value <= 0:
+                invalid.append(token)
+                continue
+            if value not in values:
+                values.append(value)
+        return values, invalid
+
     @staticmethod
     def _format_batch_section_title(base_title: str, applied: bool) -> str:
         marker = "☑ Applied" if applied else "☐ Not Applied"
@@ -378,6 +601,10 @@ class BatchProcessingDialog(QDialog):
         if hasattr(self, "batch_aperture_box") and hasattr(self, "aperture_checkbox"):
             self.batch_aperture_box.setTitle(
                 self._format_batch_section_title("Aperture Overlay", self.aperture_checkbox.isChecked())
+            )
+        if hasattr(self, "batch_rings_box") and hasattr(self, "rings_checkbox"):
+            self.batch_rings_box.setTitle(
+                self._format_batch_section_title("Resolution Rings", self.rings_checkbox.isChecked())
             )
 
     def _add_files(self):
@@ -439,7 +666,8 @@ class BatchProcessingDialog(QDialog):
             self.pixel_unit_combo.setCurrentText("nm")
 
             defaults = get_mode_overlay_defaults(preset_name)
-            if defaults is not None:
+            # Real-space scalebar defaults only; diffraction mode uses reciprocal units.
+            if defaults is not None and not self._is_diffraction():
                 self.scalebar_unit_combo.setCurrentText(defaults["unit"])
                 self.scalebar_length_spinbox.setValue(defaults["scalebar_length_value"])
                 self._batch_scalebar_length_text_raw = defaults["scalebar_length_text"]
@@ -486,6 +714,29 @@ class BatchProcessingDialog(QDialog):
     def _on_batch_scalebar_length_text_edited(self, text: str):
         self._batch_scalebar_length_text_raw = text
 
+    @staticmethod
+    def _resolve_file_geometry(
+        processor: ImageProcessor, use_header: bool, fallback: dict
+    ) -> DiffractionGeometry | None:
+        """Diffraction geometry for the currently loaded (and cropped) file, or None if invalid."""
+        header = processor.get_header_diffraction_geometry() if use_header else {}
+        image = processor.get_current_image()
+        if image is None:
+            return None
+        height, width = image.shape[:2]
+        header_center = header.get("beam_center_px") if use_header else None
+        if header_center is not None:
+            beam_center = processor.map_loaded_to_current(*header_center)
+        else:
+            beam_center = (width / 2.0, height / 2.0)
+        geometry = DiffractionGeometry(
+            camera_length_mm=float(header.get("camera_length_mm", fallback["camera_length_mm"])),
+            wavelength_angstrom=float(header.get("wavelength_angstrom", fallback["wavelength_angstrom"])),
+            pixel_size_mm=float(header.get("pixel_size_mm", fallback["pixel_size_mm"])),
+            beam_center_px=(float(beam_center[0]), float(beam_center[1])),
+        )
+        return geometry if geometry.is_valid() else None
+
     def _process_all(self):
         if not self.files:
             QMessageBox.warning(self, "No Files", "Please add files to process.")
@@ -519,6 +770,31 @@ class BatchProcessingDialog(QDialog):
         aperture_enabled = self.aperture_checkbox.isChecked()
         aperture_size = int(self.aperture_size_combo.currentText())
 
+        is_diffraction = self._is_diffraction()
+        intensity_scaling = self.intensity_scaling_combo.currentText()
+        diff_use_header = self.diff_use_header_checkbox.isChecked()
+        diff_fallback = {
+            "camera_length_mm": float(self.diff_camera_length_spinbox.value()),
+            "wavelength_angstrom": float(self.diff_wavelength_spinbox.value()),
+            "pixel_size_mm": float(self.diff_pixel_size_spinbox.value()) / 1000.0,
+        }
+        rings_enabled = is_diffraction and self.rings_checkbox.isChecked()
+        ring_values: list[float] = []
+        if rings_enabled:
+            ring_values, invalid_tokens = self._parse_ring_resolutions()
+            if invalid_tokens:
+                answer = QMessageBox.question(
+                    self,
+                    "Invalid Ring Resolutions",
+                    "These resolution ring entries are not positive numbers and will be ignored:\n"
+                    + ", ".join(invalid_tokens)
+                    + "\n\nContinue processing?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+
         batch_auto_crop_enabled = self.batch_auto_crop_checkbox.isChecked()
         batch_crop_top_rows = self.batch_crop_top_spinbox.value()
         batch_crop_bottom_rows = self.batch_crop_bottom_spinbox.value()
@@ -546,6 +822,33 @@ class BatchProcessingDialog(QDialog):
         renderer.aperture_enabled = aperture_enabled
         renderer.aperture_nominal_size = aperture_size
         renderer.aperture_color = QColor(self.aperture_color)
+
+        processor.intensity_scaling = intensity_scaling  # used by load_image
+        if is_diffraction:
+            renderer.scalebar_unit = "nm"  # real-space unit unused in diffraction mode
+            renderer.recip_scalebar_unit = scalebar_unit
+            renderer.recip_scalebar_length_value = float(scalebar_length)
+            renderer.aperture_enabled = False
+            renderer.rings_enabled = rings_enabled and bool(ring_values)
+            # Carry over label positions dragged in the main window (matched by d-spacing).
+            main_rings = {
+                round(float(r["d"]), 6): r for r in (getattr(self.renderer, "ring_resolutions", []) or [])
+                if isinstance(r, dict) and r.get("label_angle") is not None
+            }
+            renderer.ring_resolutions = []
+            for d in ring_values:
+                ring = {"d": float(d), "enabled": True}
+                source = main_rings.get(round(float(d), 6))
+                if source is not None:
+                    ring["label_angle"] = float(source["label_angle"])
+                    ring["label_radial"] = float(source.get("label_radial", 0.0))
+                renderer.ring_resolutions.append(ring)
+            renderer.ring_color = QColor(self.ring_color)
+            renderer.ring_line_width = int(self.ring_width_spinbox.value())
+            renderer.ring_show_labels = self.ring_labels_checkbox.isChecked()
+            renderer.ring_font = getattr(self.renderer, "ring_font", renderer.ring_font)
+            renderer.beam_center_marker_enabled = False
+        renderer.measurement_enabled = False
 
         override = getattr(self, "_batch_scalebar_length_text_raw", None)
         if isinstance(override, str) and override.strip() != "":
@@ -593,10 +896,26 @@ class BatchProcessingDialog(QDialog):
                 if auto_bc:
                     processor.auto_adjust_contrast()
 
-                file_nm = processor.get_file_pixel_size_nm() if use_file_pixel_size else None
-                nm_per_pixel = file_nm if file_nm else fallback_nm_per_pixel
+                geometry = None
+                if is_diffraction:
+                    geometry = self._resolve_file_geometry(processor, diff_use_header, diff_fallback)
+                    if geometry is None:
+                        failed.append(
+                            (
+                                file_path,
+                                "Invalid diffraction calibration (camera length, wavelength and "
+                                "pixel size must be positive).",
+                            )
+                        )
+                        continue
+                    nm_per_pixel = fallback_nm_per_pixel
+                else:
+                    file_nm = processor.get_file_pixel_size_nm() if use_file_pixel_size else None
+                    nm_per_pixel = file_nm if file_nm else fallback_nm_per_pixel
 
-                q_image = renderer.render_image_with_overlays(processor.get_current_image(), nm_per_pixel)
+                q_image = renderer.render_image_with_overlays(
+                    processor.get_current_image(), nm_per_pixel, diffraction=geometry
+                )
                 if q_image is None:
                     failed.append((file_path, "Failed to render image"))
                     continue

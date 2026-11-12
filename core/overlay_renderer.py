@@ -7,7 +7,19 @@ from typing import Optional
 import math
 import numpy as np
 from qtpy.QtGui import QImage, QPainter, QPen, QBrush, QColor, QFont
-from qtpy.QtCore import Qt, QRectF
+from qtpy.QtCore import Qt, QRectF, QPointF
+
+from core.diffraction import (
+    D_SPACING_ANGSTROM,
+    DEFAULT_RING_RESOLUTIONS,
+    RECIPROCAL_ANGSTROM,
+    DiffractionGeometry,
+    format_reciprocal_value,
+    format_resolution_label,
+    format_resolution_value,
+    inv_angstrom_to_unit,
+    reciprocal_to_inv_angstrom,
+)
 
 
 def qimage_to_rgba_array(q_image: QImage) -> np.ndarray:
@@ -48,17 +60,32 @@ class OverlayRenderer:
         # Optional label override (numeric text only, without unit). If set, we'll display it verbatim.
         self.scalebar_label_override: Optional[str] = None
         
+        # Reciprocal-space scalebar (diffraction mode); kept separate from the real-space
+        # unit/length so switching image type restores each mode's own settings.
+        self.recip_scalebar_unit = RECIPROCAL_ANGSTROM
+        self.recip_scalebar_length_value = 0.5
+
+        # Resolution rings (diffraction mode). Each entry: {"d": float (Å), "enabled": bool}
+        self.rings_enabled = False
+        self.ring_resolutions: list = [{"d": float(d), "enabled": True} for d in DEFAULT_RING_RESOLUTIONS]
+        self.ring_color = QColor(0, 255, 255)
+        self.ring_line_width = 2
+        self.ring_show_labels = True
+        self.ring_font = QFont("Arial", 14, QFont.Weight.Bold)
+        self.beam_center_marker_enabled = False
+
         # Aperture parameters
         self.aperture_enabled = False
         self.aperture_nominal_size = 100  # diameter in µm
         self.aperture_color = QColor(255, 255, 0)
 
-        # Particle measurement annotation parameters
+        # Measurement annotation parameters
         self.measurement_enabled = False
         self.measurements: list = []           # list of {"start": (x,y), "end": (x,y), "label_offset": (dx,dy)}
         self.measurement_preview: Optional[dict] = None  # in-progress drag
         self.measurement_unit = "nm"
-        self.measurement_line_color = QColor(0, 255, 0)
+        self.recip_measurement_unit = D_SPACING_ANGSTROM  # resolution read-out by default
+        self.measurement_line_color= QColor(0, 255, 0)
         self.measurement_text_color = QColor(0, 255, 0)
         self.measurement_show_label = True
         self.measurement_line_width = 4
@@ -68,13 +95,17 @@ class OverlayRenderer:
     
     def render_image_with_overlays(self, 
                                    image: np.ndarray, 
-                                   nm_per_pixel: float) -> Optional[QImage]:
+                                   nm_per_pixel: float,
+                                   diffraction: Optional[DiffractionGeometry] = None) -> Optional[QImage]:
         """
         Render image with scalebar and aperture overlays.
-        
+
         Args:
             image: The numpy array image to render
-            nm_per_pixel: Calibration in nanometers per pixel
+            nm_per_pixel: Calibration in nanometers per pixel (real-space images)
+            diffraction: If given, the image is a diffraction pattern (reciprocal space):
+                scalebar in reciprocal units, resolution rings instead of the aperture,
+                measurements in reciprocal space.
             
         Returns:
             QImage with overlays drawn, or None if image is invalid
@@ -99,10 +130,23 @@ class OverlayRenderer:
         qimg = QImage(rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
         qimg = qimg.copy().convertToFormat(QImage.Format.Format_ARGB32)
         
+        if diffraction is not None:
+            if not diffraction.is_valid():
+                return qimg
+            if self.rings_enabled:
+                self._draw_resolution_rings(qimg, width, height, diffraction)
+            if self.beam_center_marker_enabled:
+                self._draw_beam_center_marker(qimg, diffraction)
+            if self.scalebar_enabled:
+                self._draw_scalebar(qimg, width, height, nm_per_pixel, diffraction)
+            if self.measurement_enabled:
+                self._draw_measurement(qimg, width, height, nm_per_pixel, diffraction)
+            return qimg
+
         # Guard against invalid calibration
         if nm_per_pixel is None or nm_per_pixel <= 0:
             return qimg
-        
+
         # Draw scalebar
         if self.scalebar_enabled:
             self._draw_scalebar(qimg, width, height, nm_per_pixel)
@@ -117,9 +161,10 @@ class OverlayRenderer:
         
         return qimg
     
-    def _draw_scalebar(self, qimg: QImage, width: int, height: int, nm_per_pixel: float):
+    def _draw_scalebar(self, qimg: QImage, width: int, height: int, nm_per_pixel: float,
+                       diffraction: Optional[DiffractionGeometry] = None):
         """Draw scalebar on the image."""
-        layout = self._compute_scalebar_layout(width, height, nm_per_pixel)
+        layout = self._compute_scalebar_layout(width, height, nm_per_pixel, diffraction)
         if layout is None:
             return
 
@@ -173,7 +218,7 @@ class OverlayRenderer:
         # Draw scalebar rectangle
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(bar_qcolor))
-        painter.drawRect(x, y, scalebar_length_px, self.scalebar_thickness)
+        painter.drawRect(QRectF(float(x), float(y), float(scalebar_length_px), float(self.scalebar_thickness)))
 
         # Draw text with outline
         pen = QPen(outline_qcolor)
@@ -188,23 +233,45 @@ class OverlayRenderer:
 
         painter.end()
 
-    def _compute_scalebar_layout(self, width: int, height: int, nm_per_pixel: float) -> Optional[dict]:
+    def _compute_scalebar_layout(self, width: int, height: int, nm_per_pixel: float,
+                                 diffraction: Optional[DiffractionGeometry] = None) -> Optional[dict]:
         """Compute scalebar geometry (bar, text, and union box) in image pixel coordinates."""
-        if nm_per_pixel is None or nm_per_pixel <= 0 or width <= 0 or height <= 0:
+        if width <= 0 or height <= 0:
             return None
 
-        # Compute scalebar length in pixels
-        if self.scalebar_unit == "µm":
-            length_nm = self.scalebar_length_value * 1000.0
+        if diffraction is not None:
+            # Reciprocal-space scalebar: linear calibration p/(λL) at the beam centre.
+            if not diffraction.is_valid():
+                return None
+            inv_a_per_px = diffraction.inv_angstrom_per_pixel()
+            unit_text = self.recip_scalebar_unit
+            default_value = float(self.recip_scalebar_length_value)
+            length_inv_a = reciprocal_to_inv_angstrom(default_value, unit_text)
+            desired_px = length_inv_a / inv_a_per_px
         else:
-            length_nm = float(self.scalebar_length_value)
-        
-        desired_px = int(round(length_nm / nm_per_pixel))
-        
+            if nm_per_pixel is None or nm_per_pixel <= 0:
+                return None
+            # Compute scalebar length in pixels
+            if self.scalebar_unit == "µm":
+                length_nm = self.scalebar_length_value * 1000.0
+            else:
+                length_nm = float(self.scalebar_length_value)
+            desired_px = length_nm / nm_per_pixel
+            unit_text = "µm" if self.scalebar_unit == "µm" else "nm"
+            default_value = length_nm / 1000.0 if self.scalebar_unit == "µm" else length_nm
+
+        # Sub-pixel bar length (rounding to whole pixels would cost up to ±0.5 px of calibration).
+        if not math.isfinite(desired_px) or desired_px <= 0:
+            return None
+
         # Keep preset anchors close to image borders while preserving room to draw.
         anchor_margin = 15
         max_px = max(1, width - 2 * anchor_margin)
-        scalebar_length_px = min(desired_px, max_px)
+        if desired_px > max_px and diffraction is not None:
+            # A clamped bar would no longer match its label; draw nothing rather than a wrong scale.
+            return None
+        # Real space keeps the historical behaviour (bar clamped to the image width).
+        scalebar_length_px = float(min(desired_px, max_px))
         
         # Determine position
         if "bottom" in self.scalebar_position:
@@ -221,16 +288,12 @@ class OverlayRenderer:
             label_value_text = str(self.scalebar_label_override).strip()
         else:
             # Default formatting if no override provided
-            if self.scalebar_unit == "µm":
-                value = length_nm / 1000.0
-            else:
-                value = length_nm
-            # Show integer if it's effectively an integer; otherwise, show up to 2 decimals without trailing zeros
+            value = default_value
+            # Show integerif it's effectively an integer; otherwise, show up to 2 decimals without trailing zeros
             if abs(value - round(value)) < 1e-9:
                 label_value_text = f"{int(round(value))}"
             else:
                 label_value_text = f"{value:.2f}".rstrip('0').rstrip('.')
-        unit_text = "µm" if self.scalebar_unit == "µm" else "nm"
         label = f"{label_value_text} {unit_text}"
 
         # Measure text using current scalebar font
@@ -333,7 +396,7 @@ class OverlayRenderer:
         return {
             "bar_x": x,
             "bar_y": y,
-            "bar_length_px": int(scalebar_length_px),
+            "bar_length_px": float(scalebar_length_px),
             "text_x": int(round(text_x)),
             "text_baseline_y": int(round(text_baseline_y)),
             "label": label,
@@ -343,9 +406,17 @@ class OverlayRenderer:
             "box_bottom": float(min(float(height - 1), rect_bottom)),
         }
 
-    def get_scalebar_box_rect(self, width: int, height: int, nm_per_pixel: float) -> Optional[tuple[float, float, float, float]]:
+    def scalebar_fits(self, width: int, height: int, nm_per_pixel: float,
+                      diffraction: Optional[DiffractionGeometry] = None) -> bool:
+        """False when the scalebar is enabled but cannot be drawn (e.g. longer than the image)."""
+        if not self.scalebar_enabled:
+            return True
+        return self._compute_scalebar_layout(width, height, nm_per_pixel, diffraction) is not None
+
+    def get_scalebar_box_rect(self, width: int, height: int, nm_per_pixel: float,
+                              diffraction: Optional[DiffractionGeometry] = None) -> Optional[tuple[float, float, float, float]]:
         """Return (left, top, right, bottom) of the full scalebar box in image coordinates."""
-        layout = self._compute_scalebar_layout(width, height, nm_per_pixel)
+        layout = self._compute_scalebar_layout(width, height, nm_per_pixel, diffraction)
         if layout is None:
             return None
         return (
@@ -401,7 +472,8 @@ class OverlayRenderer:
         
         painter.end()
 
-    def _draw_measurement(self, qimg: QImage, width: int, height: int, nm_per_pixel: float):
+    def _draw_measurement(self, qimg: QImage, width: int, height: int, nm_per_pixel: float,
+                          diffraction: Optional[DiffractionGeometry] = None):
         """Draw all committed measurements and the live drag preview."""
         to_draw = list(self.measurements)
         if self.measurement_preview is not None:
@@ -472,15 +544,12 @@ class OverlayRenderer:
             luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
             outline_color = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
 
-            length_nm = length_px * float(nm_per_pixel)
-            if self.measurement_unit == "µm":
-                value = length_nm / 1000.0
-                unit_text = "µm"
-            else:
-                value = length_nm
-                unit_text = "nm"
-            value_text = str(int(round(value)))
-            label = f"{value_text} {unit_text}"
+            # Value from the unrounded (sub-pixel) end points; the drawn line uses whole pixels.
+            fx1 = max(0.0, min(float(width), float(m["start"][0])))
+            fy1 = max(0.0, min(float(height), float(m["start"][1])))
+            fx2 = max(0.0, min(float(width), float(m["end"][0])))
+            fy2 = max(0.0, min(float(height), float(m["end"][1])))
+            label = self.format_measurement_label((fx1, fy1), (fx2, fy2), nm_per_pixel, diffraction)
 
             fm = painter.fontMetrics()
             text_w = fm.horizontalAdvance(label)
@@ -556,6 +625,192 @@ class OverlayRenderer:
             painter.setBrush(QBrush(color))
             painter.drawEllipse(QRectF(float(x) - radius, float(y) - radius, 2.0 * radius, 2.0 * radius))
             painter.setBrush(old_brush)
+
+    # --- Diffraction (reciprocal-space) overlays -------------------------------------------
+
+    def measurement_value(self, start, end, nm_per_pixel: float,
+                          diffraction: Optional[DiffractionGeometry] = None) -> tuple[float, str]:
+        """Return (value, unit_text) for a measurement line in the active unit.
+
+        Real space: length in nm/µm. Diffraction: exact reciprocal distance |s2 - s1| on the
+        Ewald sphere in Å⁻¹/nm⁻¹, or the corresponding d-spacing 1/|s2 - s1| in Å.
+        """
+        if diffraction is not None and diffraction.is_valid():
+            recip = diffraction.reciprocal_distance(
+                (float(start[0]), float(start[1])), (float(end[0]), float(end[1]))
+            )
+            unit = self.recip_measurement_unit
+            if unit == D_SPACING_ANGSTROM:
+                return (1.0 / recip if recip > 0 else math.inf), "Å"
+            return inv_angstrom_to_unit(recip, unit), unit
+
+        length_px = math.hypot(float(end[0]) - float(start[0]), float(end[1]) - float(start[1]))
+        length_nm = length_px * float(nm_per_pixel or 0.0)
+        if self.measurement_unit == "µm":
+            return length_nm / 1000.0, "µm"
+        return length_nm, "nm"
+
+    def format_measurement_label(self, start, end, nm_per_pixel: float,
+                                 diffraction: Optional[DiffractionGeometry] = None) -> str:
+        """On-image label text for a measurement line."""
+        value, unit = self.measurement_value(start, end, nm_per_pixel, diffraction)
+        if diffraction is not None and diffraction.is_valid():
+            if self.recip_measurement_unit == D_SPACING_ANGSTROM:
+                return format_resolution_value(value)
+            return f"{format_reciprocal_value(value)} {unit}"
+        return f"{int(round(value))} {unit}"
+
+    def _draw_beam_center_marker(self, qimg: QImage, diffraction: DiffractionGeometry):
+        """Draw a small cross at the beam centre (uses the ring colour)."""
+        cx, cy = diffraction.beam_center_px
+        painter = QPainter(qimg)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor(self.ring_color))
+        pen.setWidthF(max(1.0, float(self.ring_line_width)))
+        painter.setPen(pen)
+        arm = max(6.0, 4.0 * float(self.ring_line_width))
+        painter.drawLine(QPointF(cx - arm, cy), QPointF(cx + arm, cy))
+        painter.drawLine(QPointF(cx, cy - arm), QPointF(cx, cy + arm))
+        painter.end()
+
+    def _draw_resolution_rings(self, qimg: QImage, width: int, height: int,
+                               diffraction: DiffractionGeometry):
+        """Draw resolution rings (d-spacings in Å) centred on the beam centre.
+
+        Ring radius uses the exact flat-detector geometry R = L·tan(2θ), θ = asin(λ/2d).
+        The pen is centred on the ring path, so the line centre marks the resolution.
+        Labels are placed just outside each ring at the first candidate angle whose label
+        box fits inside the image.
+        """
+        layout = self.compute_ring_layout(width, height, diffraction)
+        if not layout:
+            return
+        cx, cy = diffraction.beam_center_px
+        color = QColor(self.ring_color)
+        line_width = max(1.0, float(self.ring_line_width))
+
+        painter = QPainter(qimg)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setFont(self._ring_font())
+
+        r_, g_, b_, *_ = color.getRgb()
+        luminance = (0.299 * r_ + 0.587 * g_ + 0.114 * b_) / 255.0
+        outline_color = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
+
+        for ring in layout:
+            pen = QPen(color)
+            pen.setWidthF(line_width)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(cx, cy), ring["radius"], ring["radius"])
+
+            box = ring.get("label_box")
+            if box is None:
+                continue
+            tx, ty = int(round(box["left"])), int(round(box["baseline"]))
+            outline_pen = QPen(outline_color)
+            outline_pen.setWidth(3)
+            painter.setPen(outline_pen)
+            painter.drawText(tx, ty, ring["label"])
+            painter.setPen(QPen(color))
+            painter.drawText(tx, ty, ring["label"])
+
+        painter.end()
+
+    def _ring_font(self) -> QFont:
+        return QFont(self.ring_font) if isinstance(self.ring_font, QFont) else QFont("Arial", 14, QFont.Weight.Bold)
+
+    def compute_ring_layout(self, width: int, height: int, diffraction: DiffractionGeometry) -> list:
+        """Ring radii and label boxes (image pixel coordinates) for the enabled rings.
+
+        Returns a list of dicts: {"entry": the ring_resolutions dict, "d", "radius", "label",
+        "label_box": None or {"left", "top", "right", "bottom", "baseline", "cx", "cy"}}.
+
+        Label placement: if the entry has "label_angle" (degrees, image y axis down) the label
+        box centre sits at that angle, at radius + "label_radial" (px, measured from the ring,
+        so the label follows the ring when the calibration or beam centre changes). Otherwise
+        it is placed just outside the ring at the first candidate angle where it fits.
+        """
+        if diffraction is None or not diffraction.is_valid():
+            return []
+        entries = [r for r in self.ring_resolutions if bool(r.get("enabled", True))]
+        if not entries:
+            return []
+        cx, cy = diffraction.beam_center_px
+        line_width = max(1.0, float(self.ring_line_width))
+        farthest_corner = max(
+            math.hypot(px - cx, py - cy) for px in (0.0, float(width)) for py in (0.0, float(height))
+        )
+
+        fm = None
+        if self.ring_show_labels:
+            tmp_img = QImage(1, 1, QImage.Format.Format_ARGB32)
+            tmp_painter = QPainter(tmp_img)
+            tmp_painter.setFont(self._ring_font())
+            fm = tmp_painter.fontMetrics()
+            ascent = float(fm.ascent())
+            text_h = ascent + float(fm.descent())
+
+        # Candidate label angles (degrees, image y axis points down): upper-right first.
+        candidate_angles = (-45.0, -135.0, 45.0, 135.0, -90.0, 0.0, 180.0, 90.0,
+                            -22.5, -67.5, -112.5, -157.5, 22.5, 67.5, 112.5, 157.5)
+        gap = line_width / 2.0 + 3.0
+        margin = 2.0
+        layout = []
+        for entry in sorted(entries, key=lambda e: float(e.get("d", 0.0))):
+            try:
+                d = float(entry.get("d"))
+            except (TypeError, ValueError):
+                continue
+            radius = diffraction.radius_px_for_resolution(d)
+            if radius is None or radius <= 0 or radius > farthest_corner + line_width:
+                continue  # unreachable, or entirely outside the image
+            ring = {"entry": entry, "d": d, "radius": radius, "label": format_resolution_label(d), "label_box": None}
+            layout.append(ring)
+            if fm is None:
+                continue
+
+            text_w = float(fm.horizontalAdvance(ring["label"]))
+
+            def _box(box_cx: float, box_cy: float) -> dict:
+                left = box_cx - text_w / 2.0
+                top = box_cy - text_h / 2.0
+                return {"left": left, "top": top, "right": left + text_w, "bottom": top + text_h,
+                        "baseline": top + ascent, "cx": box_cx, "cy": box_cy}
+
+            manual_angle = entry.get("label_angle")
+            if manual_angle is not None:
+                try:
+                    a = math.radians(float(manual_angle))
+                    radial = float(entry.get("label_radial", 0.0))
+                except (TypeError, ValueError):
+                    a, radial = None, 0.0
+                if a is not None and math.isfinite(a) and math.isfinite(radial):
+                    dist = max(0.0, radius + radial)
+                    box_cx = cx + math.cos(a) * dist
+                    box_cy = cy + math.sin(a) * dist
+                    # Keep a manually placed label inside the image.
+                    box_cx = min(max(box_cx, text_w / 2.0), float(width) - text_w / 2.0)
+                    box_cy = min(max(box_cy, text_h / 2.0), float(height) - text_h / 2.0)
+                    ring["label_box"] = _box(box_cx, box_cy)
+                    continue
+
+            for angle_deg in candidate_angles:
+                a = math.radians(angle_deg)
+                ux, uy = math.cos(a), math.sin(a)
+                # Push the label box outward until its nearest corner clears the ring.
+                half_extent = abs(ux) * text_w / 2.0 + abs(uy) * text_h / 2.0
+                dist = radius + gap + half_extent
+                box = _box(cx + ux * dist, cy + uy * dist)
+                if (box["left"] >= margin and box["top"] >= margin
+                        and box["right"] <= width - margin and box["bottom"] <= height - margin):
+                    ring["label_box"] = box
+                    break
+
+        if fm is not None:
+            tmp_painter.end()
+        return layout
 
     def get_label_centres(self) -> list:
         """Return the image-pixel centre of each committed measurement label.

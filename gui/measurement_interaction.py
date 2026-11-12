@@ -21,6 +21,12 @@ class MeasurementInteractionController:
             return
         if e.crop_handle_mouse_press(x, y):
             return
+        if getattr(e, "_beam_pick_active", False):
+            e.handle_beam_center_click(x, y)
+            return
+        if getattr(e, "_ring_label_drag_active", False):
+            e.start_ring_label_drag(x, y)
+            return
         if e._scalebar_drag_active:
             self.start_scalebar_drag(x, y)
             return
@@ -34,14 +40,25 @@ class MeasurementInteractionController:
         mapped = e._map_label_to_image_coords(x, y)
         if mapped is None:
             return
-        e._draw_preview_start = mapped
-        e.overlay_renderer.measurement_preview = {"start": mapped, "end": mapped}
+        start = mapped
+        e._draw_anchor_center = False
+        if e.image_type == "diffraction" and e.measure_from_center_checkbox.isChecked():
+            center = e._beam_center_current()
+            if center is not None:
+                # Line from the beam centre: the label gives the resolution of the end point.
+                start = (float(center[0]), float(center[1]))
+                e._draw_anchor_center = True
+        e._draw_preview_start = start
+        e.overlay_renderer.measurement_preview = {"start": start, "end": mapped}
         e.update_display()
 
     def on_draw_move(self, x: int, y: int):
         """Mouse move handler for live preview and drag updates."""
         e = self.editor
         if e.crop_handle_mouse_move(x, y):
+            return
+        if getattr(e, "_ring_label_drag_active", False):
+            e.update_ring_label_drag(x, y)
             return
         if e._scalebar_drag_active:
             self.update_scalebar_drag(x, y)
@@ -68,6 +85,9 @@ class MeasurementInteractionController:
         e = self.editor
         if e.crop_handle_mouse_release(x, y):
             return
+        if getattr(e, "_ring_label_drag_active", False):
+            e.finish_ring_label_drag(x, y)
+            return
         if e._scalebar_drag_active:
             self.finish_scalebar_drag(x, y)
             return
@@ -85,6 +105,12 @@ class MeasurementInteractionController:
             mapped = e._draw_preview_start
         start = e._draw_preview_start
         end = mapped
+        if e.image_type == "diffraction" and e.snap_measurement_end_checkbox.isChecked():
+            refined = e.image_processor.refine_peak_centroid(float(end[0]) + 0.5, float(end[1]) + 0.5)
+            if refined is not None:
+                end = (float(refined[0]), float(refined[1]))
+        anchor_center = bool(getattr(e, "_draw_anchor_center", False))
+        e._draw_anchor_center = False
         e._draw_preview_start = None
         e.overlay_renderer.measurement_preview = None
         if np.hypot(float(end[0] - start[0]), float(end[1] - start[1])) > 3:
@@ -98,6 +124,7 @@ class MeasurementInteractionController:
                     "line_color": QColor(e.overlay_renderer.measurement_line_color),
                     "text_color": QColor(e.overlay_renderer.measurement_text_color),
                     "line_width": int(e.overlay_renderer.measurement_line_width),
+                    "anchor_center": anchor_center,
                 }
             )
             e._refresh_measurements_list()
@@ -116,7 +143,9 @@ class MeasurementInteractionController:
         img_x, img_y = float(mapped[0]), float(mapped[1])
 
         img_w, img_h = e._last_rendered_image_size
-        rect = e.overlay_renderer.get_scalebar_box_rect(img_w, img_h, e.nm_per_pixel)
+        rect = e.overlay_renderer.get_scalebar_box_rect(
+            img_w, img_h, e.nm_per_pixel, e.current_diffraction_geometry()
+        )
         if rect is None:
             return
 
@@ -228,8 +257,14 @@ class MeasurementInteractionController:
         x2 += shift_x
         y2 += shift_y
 
-        e.overlay_renderer.measurements[e._line_drag_index]["start"] = (int(round(x1)), int(round(y1)))
-        e.overlay_renderer.measurements[e._line_drag_index]["end"] = (int(round(x2)), int(round(y2)))
+        m = e.overlay_renderer.measurements[e._line_drag_index]
+        if m.get("anchor_center"):
+            ex = min(max(e._line_drag_start_end[0] + ddx, 0.0), float(img_w - 1))
+            ey = min(max(e._line_drag_start_end[1] + ddy, 0.0), float(img_h - 1))
+            m["end"] = (ex, ey)
+        else:
+            m["start"] = (int(round(x1)), int(round(y1)))
+            m["end"] = (int(round(x2)), int(round(y2)))
         e._refresh_measurements_list()
         e.update_display()
 

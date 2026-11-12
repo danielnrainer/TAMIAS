@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from qtpy.QtGui import QColor
+from qtpy.QtGui import QColor, QFont
 
+from core.diffraction import RECIPROCAL_MEASUREMENT_UNITS, RECIPROCAL_UNITS
 from gui.custom_widgets import set_color_button_indicator
 from utils.app_settings_manager import AppSettingsStorage
 from utils.preset_manager import PresetStorage
@@ -57,6 +58,48 @@ class AppStateManager:
         renderer.scalebar_bg_color = _as_color("scalebar_bg_color", renderer.scalebar_bg_color)
         renderer.scalebar_bg_opacity = _as_int("scalebar_bg_opacity", renderer.scalebar_bg_opacity, 0, 255)
 
+        recip_unit = str(settings.get("recip_scalebar_unit", renderer.recip_scalebar_unit))
+        renderer.recip_scalebar_unit = recip_unit if recip_unit in RECIPROCAL_UNITS else RECIPROCAL_UNITS[0]
+        renderer.recip_scalebar_length_value = _as_float(
+            "recip_scalebar_length_value", renderer.recip_scalebar_length_value, 0.01, 10000.0
+        )
+        recip_m_unit = str(settings.get("recip_measurement_unit", renderer.recip_measurement_unit))
+        renderer.recip_measurement_unit = (
+            recip_m_unit if recip_m_unit in RECIPROCAL_MEASUREMENT_UNITS else RECIPROCAL_MEASUREMENT_UNITS[0]
+        )
+        renderer.rings_enabled = _as_bool("rings_enabled", renderer.rings_enabled)
+        rings = settings.get("ring_resolutions")
+        if isinstance(rings, list):
+            parsed = []
+            for entry in rings:
+                try:
+                    d = float(entry.get("d")) if isinstance(entry, dict) else float(entry)
+                except (TypeError, ValueError):
+                    continue
+                if d > 0 and d == d and d != float("inf"):
+                    enabled = bool(entry.get("enabled", True)) if isinstance(entry, dict) else True
+                    ring = {"d": d, "enabled": enabled}
+                    if isinstance(entry, dict) and entry.get("label_angle") is not None:
+                        try:
+                            angle = float(entry["label_angle"])
+                            radial = float(entry.get("label_radial", 0.0))
+                            if all(v == v and abs(v) != float("inf") for v in (angle, radial)):
+                                ring["label_angle"] = angle
+                                ring["label_radial"] = radial
+                        except (TypeError, ValueError):
+                            pass
+                    parsed.append(ring)
+            renderer.ring_resolutions = parsed
+        renderer.ring_color = _as_color("ring_color", renderer.ring_color)
+        renderer.ring_line_width = _as_int("ring_line_width", renderer.ring_line_width, 1, 20)
+        renderer.ring_show_labels = _as_bool("ring_show_labels", renderer.ring_show_labels)
+        ring_font_text = settings.get("ring_font")
+        if isinstance(ring_font_text, str) and ring_font_text:
+            font = QFont()
+            if font.fromString(ring_font_text):
+                renderer.ring_font = font
+        renderer.beam_center_marker_enabled = _as_bool("beam_center_marker_enabled", renderer.beam_center_marker_enabled)
+
         renderer.aperture_enabled = _as_bool("aperture_enabled", renderer.aperture_enabled)
         renderer.aperture_nominal_size = _as_int("aperture_nominal_size", renderer.aperture_nominal_size, 1, 10000)
         renderer.aperture_color = _as_color("aperture_color", renderer.aperture_color)
@@ -88,6 +131,14 @@ class AppStateManager:
         set_color_button_indicator(editor.bar_color_btn, renderer.bar_color)
         set_color_button_indicator(editor.text_color_btn, renderer.text_color)
         set_color_button_indicator(editor.bg_color_btn, renderer.scalebar_bg_color)
+
+        editor.rings_checkbox.setChecked(bool(renderer.rings_enabled))
+        editor.ring_width_spinbox.setValue(int(renderer.ring_line_width))
+        editor.ring_labels_checkbox.setChecked(bool(renderer.ring_show_labels))
+        editor.beam_marker_checkbox.setChecked(bool(renderer.beam_center_marker_enabled))
+        set_color_button_indicator(editor.ring_color_btn, renderer.ring_color)
+        editor._populate_ring_list()
+        editor._update_ring_font_label()
 
         editor.aperture_checkbox.setChecked(renderer.aperture_enabled)
         editor.aperture_size_combo.setCurrentText(str(renderer.aperture_nominal_size))
@@ -149,6 +200,24 @@ class AppStateManager:
                 "scalebar_bg_enabled": bool(renderer.scalebar_bg_enabled),
                 "scalebar_bg_color": renderer.scalebar_bg_color.name(),
                 "scalebar_bg_opacity": int(renderer.scalebar_bg_opacity),
+                "recip_scalebar_unit": str(renderer.recip_scalebar_unit),
+                "recip_scalebar_length_value": float(renderer.recip_scalebar_length_value),
+                "recip_measurement_unit": str(renderer.recip_measurement_unit),
+                "rings_enabled": bool(renderer.rings_enabled),
+                "ring_resolutions": [
+                    {
+                        "d": float(r["d"]),
+                        "enabled": bool(r.get("enabled", True)),
+                        **({"label_angle": float(r["label_angle"]), "label_radial": float(r.get("label_radial", 0.0))}
+                           if r.get("label_angle") is not None else {}),
+                    }
+                    for r in renderer.ring_resolutions
+                ],
+                "ring_font": renderer._ring_font().toString(),
+                "ring_color": renderer.ring_color.name(),
+                "ring_line_width": int(renderer.ring_line_width),
+                "ring_show_labels": bool(renderer.ring_show_labels),
+                "beam_center_marker_enabled": bool(renderer.beam_center_marker_enabled),
                 "aperture_enabled": bool(renderer.aperture_enabled),
                 "aperture_nominal_size": int(renderer.aperture_nominal_size),
                 "aperture_color": renderer.aperture_color.name(),
@@ -161,6 +230,7 @@ class AppStateManager:
                 "measurement_start_cap": str(editor.measurement_start_end_combo.currentText()),
                 "measurement_end_cap": str(editor.measurement_end_end_combo.currentText()),
             },
+            "diffraction": editor._collect_diffraction_settings(),
         }
         return settings
 
