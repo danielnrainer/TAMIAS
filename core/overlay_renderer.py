@@ -10,6 +10,24 @@ from qtpy.QtGui import QImage, QPainter, QPen, QBrush, QColor, QFont
 from qtpy.QtCore import Qt, QRectF
 
 
+def qimage_to_rgba_array(q_image: QImage) -> np.ndarray:
+    """Return a copy of ``q_image`` as an (H, W, 4) uint8 RGBA array.
+
+    Works with both Qt bindings: PyQt6's ``QImage.bits()`` returns a
+    ``sip.voidptr`` that must be sized with ``setsize()``, whereas PySide6
+    returns an already-sized ``memoryview`` without that method.
+    """
+    q_rgba = q_image.convertToFormat(QImage.Format.Format_RGBA8888)
+    width = q_rgba.width()
+    height = q_rgba.height()
+    bytes_per_line = q_rgba.bytesPerLine()
+    ptr = q_rgba.bits()
+    if hasattr(ptr, "setsize"):
+        ptr.setsize(height * bytes_per_line)
+    buf = np.frombuffer(ptr, np.uint8, count=height * bytes_per_line)
+    return buf.reshape((height, bytes_per_line))[:, : width * 4].reshape((height, width, 4)).copy()
+
+
 class OverlayRenderer:
     """Handles rendering of scalebar, aperture, and measurement overlays."""
     

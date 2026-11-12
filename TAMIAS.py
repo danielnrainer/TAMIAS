@@ -25,7 +25,7 @@ from qtpy.QtWidgets import QColorDialog, QFontDialog
 
 # Import our modules
 from core.image_processor import ImageProcessor
-from core.overlay_renderer import OverlayRenderer
+from core.overlay_renderer import OverlayRenderer, qimage_to_rgba_array
 from core.crop_geometry import compute_display_mapping, map_label_to_image_coords, point_to_segment_distance
 from utils.preset_manager import PresetManager, PresetStorage
 from utils.app_settings_manager import AppSettingsStorage
@@ -1685,14 +1685,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
                     QMessageBox.warning(self, "Warning", "No image to export.")
                     return
                 
-                # Convert to RGBA8888
-                q_rgba = q_image.convertToFormat(QImage.Format.Format_RGBA8888)
-                width = q_rgba.width()
-                height = q_rgba.height()
-                ptr = q_rgba.bits()
-                ptr.setsize(height * width * 4)
-                arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
-                export_rgba = arr.copy()
+                # Convert to RGBA8888 numpy array (works under PyQt6 and PySide6)
+                export_rgba = qimage_to_rgba_array(q_image)
                 
                 # Determine DPI
                 input_dpi = self.image_processor.get_dpi()

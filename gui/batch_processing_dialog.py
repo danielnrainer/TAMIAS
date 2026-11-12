@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 from PIL import Image
 
 from qtpy.QtCore import Qt
-from qtpy.QtGui import QColor, QImage
+from qtpy.QtGui import QColor
 from qtpy.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -31,7 +30,7 @@ from qtpy.QtWidgets import (
 )
 
 from core.image_processor import ImageProcessor
-from core.overlay_renderer import OverlayRenderer
+from core.overlay_renderer import OverlayRenderer, qimage_to_rgba_array
 from gui.collapsible_box import QCollapsibleBox
 from gui.custom_widgets import SmartDoubleSpinBox, set_color_button_indicator
 from utils.imaging_mode_defaults import (
@@ -607,13 +606,7 @@ class BatchProcessingDialog(QDialog):
                 output_name = input_path.stem + suffix + "." + output_format
                 output_path = output_dir / output_name
 
-                q_rgba = q_image.convertToFormat(QImage.Format.Format_RGBA8888)
-                width = q_rgba.width()
-                height = q_rgba.height()
-                ptr = q_rgba.bits()
-                ptr.setsize(height * width * 4)
-                arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
-                export_rgba = arr.copy()
+                export_rgba = qimage_to_rgba_array(q_image)
 
                 input_dpi = processor.get_dpi()
                 if input_dpi and all(v > 0 for v in input_dpi):
