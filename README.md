@@ -44,6 +44,7 @@ If you encounter any issue and would like to report it or have a feature request
 - **RODHyPix** (`.rodhypix`) - Rigaku Oxford Diffraction native format
   - Direct-space pixel size is read from the file header, so no preset is needed for images that contain it
   - *Not every image carries it*: with CrysAlisPro v45.96 (and earlier), post-experiment images might not store a pixel size, so an imaging preset must be selected for those (see below)
+  - Diffraction frames (no direct-space pixel size) are calibrated from the header's camera length, wavelength, detector pixel size and beam origin; see [Diffraction Patterns](#diffraction-patterns)
   - Read via the [rodhypix](https://pypi.org/project/rodhypix/) package, using its native C++/NumPy backend when available (falls back to pure Python)
 - **TIFF** (`.tif`, `.tiff`) - Standard image format; might not carry pixel size calibration, so preset is required
 - **PNG** (`.png`)
@@ -66,12 +67,19 @@ pip install -r requirements.txt
 ```
   Install one Qt backend as well, for example `pip install PyQt6` or `pip install PySide6`. This includes [rodhypix](https://pypi.org/project/rodhypix/), which provides `.rodhypix` file support with a native C++/NumPy backend on supported platforms and a pure Python fallback elsewhere.
 
+3. (Optional, for developers) Install the test dependencies:
+```bash
+pip install -r requirements-dev.txt
+```
+
 ### Usage
 
 Run the application:
 ```bash
 python TAMIAS.py
 ```
+
+For diffraction patterns, set **Image type → Diffraction pattern** before annotating (the app offers this when a loaded file looks like one).
 
 ### App Data and Settings
 
@@ -154,7 +162,7 @@ TAMIAS/
 │   ├── measurement_interaction.py  # Measurement draw/drag interaction controller
 │   ├── theme_manager.py            # Theme application and OS sync
 │   └── ui_sections.py              # Extracted setup-section builders for main UI
-├── tests/                          # Unit tests (python -m pytest tests)
+├── tests/                          # Unit tests (see Running Tests)
 ├── utils/                          # Utility modules
 │   ├── app_settings_manager.py     # Persistent app settings storage
 │   ├── imaging_mode_defaults.py    # Defaults for unit and scalebar length for each image mode
@@ -162,7 +170,8 @@ TAMIAS/
 │   └── storage_paths.py            # Per-user app-data path helpers
 ├── TAMIAS.py                       # Main application entry point
 ├── TAMIAS.spec                     # PyInstaller build specification
-├── requirements.txt                # Python dependencies
+├── requirements.txt                # Python dependencies (runtime and build)
+├── requirements-dev.txt            # Test dependencies (adds pytest)
 ├── presets_defaults.json           # Shipped preset/crop defaults
 ├── settings_defaults.json          # Shipped app settings defaults
 ├── tamias.ico                      # Application icon
@@ -179,9 +188,20 @@ TAMIAS/
 - PyInstaller >= 6.0, < 7 (for building executables)
 - rodhypix >= 0.1.3, < 0.2 (for `.rodhypix` file support)
 
+Test-only (`requirements-dev.txt`): pytest
+
+## Running Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests
+```
+
+The tests cover the diffraction geometry (electron wavelength, ring radii, reciprocal distances, header parsing), crop/flip bookkeeping of the beam centre, and intensity scaling.
+
 ## Technical Details
 
-- **Image Processing**: 8-bit grayscale (16-bit images auto-normalized)
+- **Image Processing**: 8-bit grayscale (16-bit images auto-normalized; diffraction patterns use linear, square-root or logarithmic intensity scaling)
 - **Cropping**: Top/bottom row crop and interactive manual crop are available before overlay rendering
 - **Scalebar Calculation**: Accounts for nm/pixel calibration (real space) or the reciprocal-space calibration p/(λL) (diffraction); the bar is drawn with sub-pixel length, and is not drawn if the requested length does not fit in the image
 - **Diffraction header values**: follow DIALS' `FormatROD` conventions (pixel size as stored, beam origin divided by binning, pixel-corner coordinates)
@@ -204,10 +224,12 @@ TAMIAS/
 
 ## Building Executable
 
-Create a standalone executable with PyInstaller:
+Create a standalone executable with PyInstaller (the spec includes the diffraction modules and all Qt backends TAMIAS uses):
 ```bash
+pip install -r requirements.txt
 pyinstaller TAMIAS.spec
 ```
+The executable is written to `dist/TAMIAS.exe`.
 
 
 ## License
