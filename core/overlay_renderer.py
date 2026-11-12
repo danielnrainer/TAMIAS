@@ -16,6 +16,7 @@ from core.diffraction import (
     DiffractionGeometry,
     format_reciprocal_value,
     format_resolution_label,
+    format_resolution_value,
     inv_angstrom_to_unit,
     reciprocal_to_inv_angstrom,
 )
@@ -60,12 +61,12 @@ class OverlayRenderer:
         self.aperture_nominal_size = 100  # diameter in µm
         self.aperture_color = QColor(255, 255, 0)
 
-        # Particle measurement annotation parameters
+        # Measurement annotation parameters
         self.measurement_enabled = False
         self.measurements: list = []           # list of {"start": (x,y), "end": (x,y), "label_offset": (dx,dy)}
         self.measurement_preview: Optional[dict] = None  # in-progress drag
         self.measurement_unit = "nm"
-        self.recip_measurement_unit = RECIPROCAL_ANGSTROM
+        self.recip_measurement_unit = D_SPACING_ANGSTROM  # resolution read-out by default
         self.measurement_line_color= QColor(0, 255, 0)
         self.measurement_text_color = QColor(0, 255, 0)
         self.measurement_show_label = True
@@ -525,7 +526,12 @@ class OverlayRenderer:
             luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
             outline_color = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
 
-            label = self.format_measurement_label((x1, y1), (x2, y2), nm_per_pixel, diffraction)
+            # Value from the unrounded (sub-pixel) end points; the drawn line uses whole pixels.
+            fx1 = max(0.0, min(float(width), float(m["start"][0])))
+            fy1 = max(0.0, min(float(height), float(m["start"][1])))
+            fx2 = max(0.0, min(float(width), float(m["end"][0])))
+            fy2 = max(0.0, min(float(height), float(m["end"][1])))
+            label = self.format_measurement_label((fx1, fy1), (fx2, fy2), nm_per_pixel, diffraction)
 
             fm = painter.fontMetrics()
             text_w = fm.horizontalAdvance(label)
@@ -632,7 +638,7 @@ class OverlayRenderer:
         value, unit = self.measurement_value(start, end, nm_per_pixel, diffraction)
         if diffraction is not None and diffraction.is_valid():
             if self.recip_measurement_unit == D_SPACING_ANGSTROM:
-                return f"d = {value:.2f} {unit}" if math.isfinite(value) and value < 100 else f"d = {format_reciprocal_value(value)} {unit}"
+                return format_resolution_value(value)
             return f"{format_reciprocal_value(value)} {unit}"
         return f"{int(round(value))} {unit}"
 
@@ -658,33 +664,82 @@ class OverlayRenderer:
         Labels are placed just outside each ring at the first candidate angle whose label
         box fits inside the image.
         """
-        entries = [r for r in self.ring_resolutions if bool(r.get("enabled", True))]
-        if not entries:
+        layout = self.compute_ring_layout(width, height, diffraction)
+        if not layout:
             return
         cx, cy = diffraction.beam_center_px
         color = QColor(self.ring_color)
         line_width = max(1.0, float(self.ring_line_width))
-        farthest_corner = max(
-            math.hypot(px - cx, py - cy) for px in (0.0, float(width)) for py in (0.0, float(height))
-        )
 
         painter = QPainter(qimg)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        try:
-            painter.setFont(self.ring_font if isinstance(self.ring_font, QFont) else QFont("Arial", 14, QFont.Weight.Bold))
-        except Exception:
-            painter.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        fm = painter.fontMetrics()
+        painter.setFont(self._ring_font())
 
         r_, g_, b_, *_ = color.getRgb()
         luminance = (0.299 * r_ + 0.587 * g_ + 0.114 * b_) / 255.0
         outline_color = QColor(0, 0, 0) if luminance > 0.5 else QColor(255, 255, 255)
 
+        for ring in layout:
+            pen = QPen(color)
+            pen.setWidthF(line_width)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(cx, cy), ring["radius"], ring["radius"])
+
+            box = ring.get("label_box")
+            if box is None:
+                continue
+            tx, ty = int(round(box["left"])), int(round(box["baseline"]))
+            outline_pen = QPen(outline_color)
+            outline_pen.setWidth(3)
+            painter.setPen(outline_pen)
+            painter.drawText(tx, ty, ring["label"])
+            painter.setPen(QPen(color))
+            painter.drawText(tx, ty, ring["label"])
+
+        painter.end()
+
+    def _ring_font(self) -> QFont:
+        return QFont(self.ring_font) if isinstance(self.ring_font, QFont) else QFont("Arial", 14, QFont.Weight.Bold)
+
+    def compute_ring_layout(self, width: int, height: int, diffraction: DiffractionGeometry) -> list:
+        """Ring radii and label boxes (image pixel coordinates) for the enabled rings.
+
+        Returns a list of dicts: {"entry": the ring_resolutions dict, "d", "radius", "label",
+        "label_box": None or {"left", "top", "right", "bottom", "baseline", "cx", "cy"}}.
+
+        Label placement: if the entry has "label_angle" (degrees, image y axis down) the label
+        box centre sits at that angle, at radius + "label_radial" (px, measured from the ring,
+        so the label follows the ring when the calibration or beam centre changes). Otherwise
+        it is placed just outside the ring at the first candidate angle where it fits.
+        """
+        if diffraction is None or not diffraction.is_valid():
+            return []
+        entries = [r for r in self.ring_resolutions if bool(r.get("enabled", True))]
+        if not entries:
+            return []
+        cx, cy = diffraction.beam_center_px
+        line_width = max(1.0, float(self.ring_line_width))
+        farthest_corner = max(
+            math.hypot(px - cx, py - cy) for px in (0.0, float(width)) for py in (0.0, float(height))
+        )
+
+        fm = None
+        if self.ring_show_labels:
+            tmp_img = QImage(1, 1, QImage.Format.Format_ARGB32)
+            tmp_painter = QPainter(tmp_img)
+            tmp_painter.setFont(self._ring_font())
+            fm = tmp_painter.fontMetrics()
+            ascent = float(fm.ascent())
+            text_h = ascent + float(fm.descent())
+
         # Candidate label angles (degrees, image y axis points down): upper-right first.
         candidate_angles = (-45.0, -135.0, 45.0, 135.0, -90.0, 0.0, 180.0, 90.0,
                             -22.5, -67.5, -112.5, -157.5, 22.5, 67.5, 112.5, 157.5)
-
+        gap = line_width / 2.0 + 3.0
+        margin = 2.0
+        layout = []
         for entry in sorted(entries, key=lambda e: float(e.get("d", 0.0))):
             try:
                 d = float(entry.get("d"))
@@ -693,49 +748,51 @@ class OverlayRenderer:
             radius = diffraction.radius_px_for_resolution(d)
             if radius is None or radius <= 0 or radius > farthest_corner + line_width:
                 continue  # unreachable, or entirely outside the image
-
-            pen = QPen(color)
-            pen.setWidthF(line_width)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawEllipse(QPointF(cx, cy), radius, radius)
-
-            if not self.ring_show_labels:
+            ring = {"entry": entry, "d": d, "radius": radius, "label": format_resolution_label(d), "label_box": None}
+            layout.append(ring)
+            if fm is None:
                 continue
-            label = format_resolution_label(d)
-            text_w = float(fm.horizontalAdvance(label))
-            ascent = float(fm.ascent())
-            descent = float(fm.descent())
-            text_h = ascent + descent
-            gap = line_width / 2.0 + 3.0
-            margin = 2.0
-            placed = None
+
+            text_w = float(fm.horizontalAdvance(ring["label"]))
+
+            def _box(box_cx: float, box_cy: float) -> dict:
+                left = box_cx - text_w / 2.0
+                top = box_cy - text_h / 2.0
+                return {"left": left, "top": top, "right": left + text_w, "bottom": top + text_h,
+                        "baseline": top + ascent, "cx": box_cx, "cy": box_cy}
+
+            manual_angle = entry.get("label_angle")
+            if manual_angle is not None:
+                try:
+                    a = math.radians(float(manual_angle))
+                    radial = float(entry.get("label_radial", 0.0))
+                except (TypeError, ValueError):
+                    a, radial = None, 0.0
+                if a is not None and math.isfinite(a) and math.isfinite(radial):
+                    dist = max(0.0, radius + radial)
+                    box_cx = cx + math.cos(a) * dist
+                    box_cy = cy + math.sin(a) * dist
+                    # Keep a manually placed label inside the image.
+                    box_cx = min(max(box_cx, text_w / 2.0), float(width) - text_w / 2.0)
+                    box_cy = min(max(box_cy, text_h / 2.0), float(height) - text_h / 2.0)
+                    ring["label_box"] = _box(box_cx, box_cy)
+                    continue
+
             for angle_deg in candidate_angles:
                 a = math.radians(angle_deg)
                 ux, uy = math.cos(a), math.sin(a)
                 # Push the label box outward until its nearest corner clears the ring.
                 half_extent = abs(ux) * text_w / 2.0 + abs(uy) * text_h / 2.0
                 dist = radius + gap + half_extent
-                box_cx = cx + ux * dist
-                box_cy = cy + uy * dist
-                left = box_cx - text_w / 2.0
-                top = box_cy - text_h / 2.0
-                if (left >= margin and top >= margin
-                        and left + text_w <= width - margin and top + text_h <= height - margin):
-                    placed = (left, top + ascent)
+                box = _box(cx + ux * dist, cy + uy * dist)
+                if (box["left"] >= margin and box["top"] >= margin
+                        and box["right"] <= width - margin and box["bottom"] <= height - margin):
+                    ring["label_box"] = box
                     break
-            if placed is None:
-                continue  # ring visible but no room for a label inside the image
 
-            tx, ty = int(round(placed[0])), int(round(placed[1]))
-            outline_pen = QPen(outline_color)
-            outline_pen.setWidth(3)
-            painter.setPen(outline_pen)
-            painter.drawText(tx, ty, label)
-            painter.setPen(QPen(color))
-            painter.drawText(tx, ty, label)
-
-        painter.end()
+        if fm is not None:
+            tmp_painter.end()
+        return layout
 
     def get_label_centres(self) -> list:
         """Return the image-pixel centre of each committed measurement label.

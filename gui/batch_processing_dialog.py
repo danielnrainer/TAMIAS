@@ -831,7 +831,19 @@ class BatchProcessingDialog(QDialog):
             renderer.recip_scalebar_length_value = float(scalebar_length)
             renderer.aperture_enabled = False
             renderer.rings_enabled = rings_enabled and bool(ring_values)
-            renderer.ring_resolutions = [{"d": float(d), "enabled": True} for d in ring_values]
+            # Carry over label positions dragged in the main window (matched by d-spacing).
+            main_rings = {
+                round(float(r["d"]), 6): r for r in (getattr(self.renderer, "ring_resolutions", []) or [])
+                if isinstance(r, dict) and r.get("label_angle") is not None
+            }
+            renderer.ring_resolutions = []
+            for d in ring_values:
+                ring = {"d": float(d), "enabled": True}
+                source = main_rings.get(round(float(d), 6))
+                if source is not None:
+                    ring["label_angle"] = float(source["label_angle"])
+                    ring["label_radial"] = float(source.get("label_radial", 0.0))
+                renderer.ring_resolutions.append(ring)
             renderer.ring_color = QColor(self.ring_color)
             renderer.ring_line_width = int(self.ring_width_spinbox.value())
             renderer.ring_show_labels = self.ring_labels_checkbox.isChecked()

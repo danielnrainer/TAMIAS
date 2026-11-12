@@ -17,6 +17,7 @@ from qtpy.QtWidgets import (
     QSlider,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from core.diffraction import COMMON_ACCELERATING_VOLTAGES_KV
@@ -296,7 +297,7 @@ def setup_aperture_controls(editor: Any, parent_layout):
 
 def setup_measurement_controls(editor: Any, parent_layout):
     """Setup particle measurement controls on the main editor."""
-    measurement_box = QCollapsibleBox("Particle Measurement", expanded=False)
+    measurement_box = QCollapsibleBox("Measurement", expanded=False)
     measurement_layout = QVBoxLayout()
 
     editor.measurement_checkbox = QCheckBox("Show Measurement Annotations")
@@ -317,6 +318,26 @@ def setup_measurement_controls(editor: Any, parent_layout):
     editor.draw_measurement_btn.toggled.connect(editor.on_draw_mode_toggled)
     measurement_layout.addWidget(editor.draw_measurement_btn)
 
+    editor.diffraction_measure_widget = QWidget()
+    diff_measure_layout = QVBoxLayout(editor.diffraction_measure_widget)
+    diff_measure_layout.setContentsMargins(0, 0, 0, 0)
+    editor.measure_from_center_checkbox = QCheckBox("Start lines at beam centre")
+    editor.measure_from_center_checkbox.setChecked(True)
+    editor.measure_from_center_checkbox.setToolTip(
+        "Diffraction: new lines start at the beam centre (and follow it if it is moved), "
+        "so the label gives the resolution of the reflection at the end point."
+    )
+    diff_measure_layout.addWidget(editor.measure_from_center_checkbox)
+    editor.snap_measurement_end_checkbox = QCheckBox("Snap end to nearest peak")
+    editor.snap_measurement_end_checkbox.setChecked(False)
+    editor.snap_measurement_end_checkbox.setToolTip(
+        "Diffraction: move the end point to the intensity-weighted centre of the brightest "
+        "spot within 15 px of where the mouse is released."
+    )
+    diff_measure_layout.addWidget(editor.snap_measurement_end_checkbox)
+    measurement_layout.addWidget(editor.diffraction_measure_widget)
+    editor.diffraction_measure_widget.setVisible(False)
+
     editor.move_line_btn = QPushButton("↔  Move Line")
     editor.move_line_btn.setCheckable(True)
     editor.move_line_btn.setToolTip(
@@ -334,7 +355,8 @@ def setup_measurement_controls(editor: Any, parent_layout):
     measurement_layout.addWidget(editor.move_label_btn)
 
     unit_layout = QHBoxLayout()
-    unit_layout.addWidget(QLabel("Length Unit:"))
+    editor.measurement_unit_label = QLabel("Length Unit:")
+    unit_layout.addWidget(editor.measurement_unit_label)
     editor.measurement_unit_combo = QComboBox()
     editor.measurement_unit_combo.addItems(["nm", "µm"])
     editor.measurement_unit_combo.currentTextChanged.connect(editor.on_measurement_changed)
@@ -632,6 +654,27 @@ def setup_resolution_ring_controls(editor: Any, parent_layout):
     editor.ring_labels_checkbox.stateChanged.connect(editor.on_ring_style_changed)
     layout.addWidget(editor.ring_labels_checkbox)
 
+    ring_font_layout = QHBoxLayout()
+    editor.ring_font_label = QLabel("")
+    ring_font_layout.addWidget(editor.ring_font_label)
+    ring_font_btn = QPushButton("Choose Font…")
+    ring_font_btn.clicked.connect(editor.choose_ring_font)
+    ring_font_layout.addWidget(ring_font_btn)
+    layout.addLayout(ring_font_layout)
+    editor._update_ring_font_label()
+
+    ring_label_btn_layout = QHBoxLayout()
+    editor.move_ring_label_btn = QPushButton("☰  Move Ring Labels")
+    editor.move_ring_label_btn.setCheckable(True)
+    editor.move_ring_label_btn.setToolTip("Click and drag a ring label to reposition it")
+    editor.move_ring_label_btn.toggled.connect(editor.on_ring_label_drag_mode_toggled)
+    ring_label_btn_layout.addWidget(editor.move_ring_label_btn)
+    reset_ring_labels_btn = QPushButton("Reset Positions")
+    reset_ring_labels_btn.setToolTip("Return all ring labels to automatic placement")
+    reset_ring_labels_btn.clicked.connect(editor.reset_ring_label_positions)
+    ring_label_btn_layout.addWidget(reset_ring_labels_btn)
+    layout.addLayout(ring_label_btn_layout)
+
     editor.beam_marker_checkbox = QCheckBox("Mark beam centre")
     editor.beam_marker_checkbox.setChecked(bool(editor.overlay_renderer.beam_center_marker_enabled))
     editor.beam_marker_checkbox.stateChanged.connect(editor.on_ring_style_changed)
@@ -645,5 +688,6 @@ def setup_resolution_ring_controls(editor: Any, parent_layout):
     layout.addWidget(editor.ring_info_label)
 
     box.setContentLayout(layout)
+    box.toggleButton.toggled.connect(editor._on_rings_section_toggled)
     editor.rings_box = box
     parent_layout.addWidget(box)

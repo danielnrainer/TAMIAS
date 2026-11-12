@@ -30,11 +30,20 @@ _SPEED_OF_LIGHT = 299792458.0       # m / s
 
 RECIPROCAL_ANGSTROM = "Å⁻¹"
 RECIPROCAL_NM = "nm⁻¹"
-D_SPACING_ANGSTROM = "d (Å)"
+D_SPACING_ANGSTROM = "Resolution (Å)"
 
 RECIPROCAL_UNITS = (RECIPROCAL_ANGSTROM, RECIPROCAL_NM)
-# Measurement read-outs available in diffraction mode
-RECIPROCAL_MEASUREMENT_UNITS = (RECIPROCAL_ANGSTROM, RECIPROCAL_NM, D_SPACING_ANGSTROM)
+# Measurement read-outs available in diffraction mode (first entry is the default):
+# resolution d = 1/|Δs| in Å, or the reciprocal length |Δs| itself.
+RECIPROCAL_MEASUREMENT_UNITS = (D_SPACING_ANGSTROM, RECIPROCAL_ANGSTROM, RECIPROCAL_NM)
+
+
+def format_resolution_value(d_angstrom: float) -> str:
+    """Resolution read-out for measurement labels, e.g. '1.23 Å' (2 decimals below 100 Å)."""
+    d = float(d_angstrom)
+    if math.isfinite(d) and d < 100.0:
+        return f"{d:.2f} Å"
+    return f"{format_reciprocal_value(d)} Å"
 
 # Default resolution-ring presets (d-spacings in Å)
 DEFAULT_RING_RESOLUTIONS = (0.8, 1.0, 1.2, 2.0)

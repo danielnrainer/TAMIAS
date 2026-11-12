@@ -36,6 +36,7 @@ from core.diffraction import (
     electron_wavelength_angstrom,
     format_reciprocal_value,
     format_resolution_label,
+    format_resolution_value,
     looks_like_diffraction_header,
 )
 from utils.preset_manager import PresetManager, PresetStorage
@@ -123,6 +124,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self._intensity_scaling_by_type = {"real": "Linear", "diffraction": "Logarithmic"}
         self._scalebar_text_raw_by_type: dict[str, Optional[str]] = {"real": None, "diffraction": None}
         self._syncing_diffraction_controls = False
+        self._ring_label_drag_active = False
+        self._ring_label_drag: Optional[dict] = None  # {"entry": ring dict, "grab": (dx, dy)}
         
         # Load presets
         default_payload = PresetStorage.get_default_payload()
@@ -631,7 +634,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self._setup_aperture_controls(controls_layout)
         ui_sections.setup_resolution_ring_controls(self, controls_layout)
 
-        # Particle measurement controls
+        # Measurement controls
         self._setup_measurement_controls(controls_layout)
         
         controls_layout.addStretch()
@@ -1425,7 +1428,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             # Ensure the annotation overlay is active when drawing starts
             if not self.measurement_checkbox.isChecked():
                 self.measurement_checkbox.setChecked(True)
-            self._cancel_beam_pick()
+            self._cancel_diffraction_tools()
             self._refresh_image_interaction_mode()
             self.measurement_status_label.setText(
                 "Draw mode ON — click and drag on the image to add a measurement."
@@ -1454,7 +1457,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             self.move_scalebar_btn.setChecked(False)
             self.move_scalebar_btn.blockSignals(False)
             self._scalebar_drag_active = False
-            self._cancel_beam_pick()
+            self._cancel_diffraction_tools()
             self._refresh_image_interaction_mode()
             self.measurement_status_label.setText(
                 "Move Label mode ON — click and drag any label to reposition it."
@@ -1481,7 +1484,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             self.move_scalebar_btn.setChecked(False)
             self.move_scalebar_btn.blockSignals(False)
             self._scalebar_drag_active = False
-            self._cancel_beam_pick()
+            self._cancel_diffraction_tools()
             self._refresh_image_interaction_mode()
             self.measurement_status_label.setText(
                 "Move Line mode ON — click and drag a measurement line to reposition it."
@@ -1508,7 +1511,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             self.move_line_btn.setChecked(False)
             self.move_line_btn.blockSignals(False)
             self._line_drag_active = False
-            self._cancel_beam_pick()
+            self._cancel_diffraction_tools()
             self._refresh_image_interaction_mode()
             self.measurement_status_label.setText(
                 "Move Scalebar mode ON — drag the scalebar box to reposition it."
@@ -1528,7 +1531,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         if self._beam_pick_active or self._draw_mode_active:
             self.image_label.set_draw_mode(True)
             return
-        if self._label_drag_active or self._line_drag_active or self._scalebar_drag_active:
+        if (self._label_drag_active or self._line_drag_active or self._scalebar_drag_active
+                or self._ring_label_drag_active):
             self.image_label.set_label_drag_mode(True)
             return
         self.image_label.set_draw_mode(False)
@@ -1624,6 +1628,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         """Repopulate the sidebar table with current measurements and properties."""
         if not hasattr(self, 'measurement_table'):
             return
+        self._sync_anchored_measurements()
         self.measurement_table.setRowCount(0)
         diffraction = self.current_diffraction_geometry()
         for i, m in enumerate(self.overlay_renderer.measurements):
@@ -1648,8 +1653,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             )
             if diffraction is None:
                 length_text = f"{value:.1f} {unit}"
-            elif unit == "Å" and np.isfinite(value) and value < 100:
-                length_text = f"d = {value:.2f} {unit}"
+            elif self.overlay_renderer.recip_measurement_unit == D_SPACING_ANGSTROM:
+                length_text = format_resolution_value(value)
             else:
                 length_text = f"{format_reciprocal_value(value)} {unit}"
             line_color = QColor(m["line_color"])
@@ -1728,6 +1733,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self.diffraction_use_header_checkbox.setChecked(bool(settings.get("use_header", True)))
         self.diffraction_use_header_checkbox.blockSignals(False)
         self.snap_beam_center_checkbox.setChecked(bool(settings.get("snap_beam_center", True)))
+        self.measure_from_center_checkbox.setChecked(bool(settings.get("measure_from_center", True)))
+        self.snap_measurement_end_checkbox.setChecked(bool(settings.get("snap_measurement_end", False)))
 
         image_type = str(settings.get("image_type", "real"))
         self.set_image_type(image_type if image_type in ("real", "diffraction") else "real", initial=True)
@@ -1740,6 +1747,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             "wavelength_angstrom": float(self._diffraction_manual["wavelength_angstrom"]),
             "pixel_size_um": float(self._diffraction_manual["pixel_size_um"]),
             "snap_beam_center": bool(self.snap_beam_center_checkbox.isChecked()),
+            "measure_from_center": bool(self.measure_from_center_checkbox.isChecked()),
+            "snap_measurement_end": bool(self.snap_measurement_end_checkbox.isChecked()),
             "intensity_scaling_real": self._intensity_scaling_by_type["real"],
             "intensity_scaling_diffraction": self._intensity_scaling_by_type["diffraction"],
         }
@@ -1776,6 +1785,9 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self.aperture_box.setVisible(not diffraction)
         self.diffraction_box.setVisible(diffraction)
         self.rings_box.setVisible(diffraction)
+        self.diffraction_measure_widget.setVisible(diffraction)
+        self.measurement_unit_label.setText("Label shows:" if diffraction else "Length Unit:")
+        self._cancel_ring_label_drag()
 
         # Unit selectors and scalebar length: each image type keeps its own values
         self.unit_combo.blockSignals(True)
@@ -1994,6 +2006,130 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self._update_measurement_info_label()
         self.update_display()
 
+    def _cancel_diffraction_tools(self):
+        """Switch off diffraction-only mouse tools when another interaction mode starts."""
+        self._cancel_beam_pick()
+        self._cancel_ring_label_drag()
+
+    def _cancel_ring_label_drag(self):
+        if hasattr(self, "move_ring_label_btn") and self.move_ring_label_btn.isChecked():
+            self.move_ring_label_btn.blockSignals(True)
+            self.move_ring_label_btn.setChecked(False)
+            self.move_ring_label_btn.blockSignals(False)
+        self._ring_label_drag_active = False
+        self._ring_label_drag = None
+
+    def on_ring_label_drag_mode_toggled(self, checked: bool):
+        self._ring_label_drag_active = checked
+        self._ring_label_drag = None
+        if checked:
+            self._cancel_beam_pick()
+            for btn_name in ("draw_measurement_btn", "move_line_btn", "move_label_btn", "move_scalebar_btn",
+                             "manual_crop_select_btn", "manual_crop_move_btn"):
+                btn = getattr(self, btn_name, None)
+                if btn is not None and btn.isChecked():
+                    btn.setChecked(False)
+            self._ring_label_drag_active = True
+            if not self.ring_labels_checkbox.isChecked():
+                self.ring_labels_checkbox.setChecked(True)
+            self.measurement_status_label.setText("Move Ring Labels: drag a ring label to reposition it.")
+        self._refresh_image_interaction_mode()
+
+    def _on_rings_section_toggled(self, expanded: bool):
+        if not expanded:
+            self._cancel_ring_label_drag()
+            self._refresh_image_interaction_mode()
+
+    def _label_to_image_float(self, label_x: int, label_y: int) -> Optional[tuple[float, float]]:
+        if self._last_rendered_image_size is None:
+            return None
+        _w, _h, scale, offset_x, offset_y = self._get_display_mapping()
+        if scale <= 0:
+            return None
+        return ((float(label_x) - offset_x) / scale, (float(label_y) - offset_y) / scale)
+
+    def start_ring_label_drag(self, label_x: int, label_y: int):
+        self._ring_label_drag = None
+        geometry = self.current_diffraction_geometry()
+        point = self._label_to_image_float(label_x, label_y)
+        if geometry is None or not geometry.is_valid() or point is None or not self.overlay_renderer.rings_enabled:
+            return
+        img_w, img_h = self._last_rendered_image_size
+        _w, _h, scale, _ox, _oy = self._get_display_mapping()
+        pad = 6.0 / max(scale, 1e-6)
+        px, py = point
+        best = None
+        for ring in self.overlay_renderer.compute_ring_layout(img_w, img_h, geometry):
+            box = ring.get("label_box")
+            if box is None:
+                continue
+            if box["left"] - pad <= px <= box["right"] + pad and box["top"] - pad <= py <= box["bottom"] + pad:
+                dist = (box["cx"] - px) ** 2 + (box["cy"] - py) ** 2
+                if best is None or dist < best[0]:
+                    best = (dist, ring)
+        if best is None:
+            self.measurement_status_label.setText("No ring label found here. Click on a ring label.")
+            return
+        ring = best[1]
+        self._ring_label_drag = {"entry": ring["entry"], "grab": (ring["label_box"]["cx"] - px,
+                                                                   ring["label_box"]["cy"] - py)}
+
+    def update_ring_label_drag(self, label_x: int, label_y: int):
+        drag = self._ring_label_drag
+        geometry = self.current_diffraction_geometry()
+        point = self._label_to_image_float(label_x, label_y)
+        if drag is None or geometry is None or not geometry.is_valid() or point is None:
+            return
+        entry = drag["entry"]
+        radius = geometry.radius_px_for_resolution(float(entry["d"]))
+        if radius is None:
+            return
+        cx, cy = geometry.beam_center_px
+        bx = point[0] + drag["grab"][0]
+        by = point[1] + drag["grab"][1]
+        # Store polar position relative to the ring so the label follows calibration changes.
+        entry["label_angle"] = float(np.degrees(np.arctan2(by - cy, bx - cx)))
+        entry["label_radial"] = float(np.hypot(bx - cx, by - cy) - radius)
+        self.update_display()
+
+    def finish_ring_label_drag(self, label_x: int, label_y: int):
+        self.update_ring_label_drag(label_x, label_y)
+        self._ring_label_drag = None
+
+    def reset_ring_label_positions(self):
+        for entry in self.overlay_renderer.ring_resolutions:
+            entry.pop("label_angle", None)
+            entry.pop("label_radial", None)
+        self.update_display()
+
+    def _update_ring_font_label(self):
+        font = self.overlay_renderer._ring_font()
+        pt = font.pointSize()
+        px = font.pixelSize()
+        size_text = f"{pt}pt" if pt > 0 else f"{px}px" if px > 0 else ""
+        self.ring_font_label.setText(f"Font: {font.family()}" + (f", {size_text}" if size_text else ""))
+
+    def choose_ring_font(self):
+        options = QFontDialog.FontDialogOption.ScalableFonts | QFontDialog.FontDialogOption.DontUseNativeDialog
+        font, ok = QFontDialog.getFont(self.overlay_renderer._ring_font(), self, "Choose Ring Label Font", options=options)
+        if ok:
+            self.overlay_renderer.ring_font = QFont(font)
+            self._update_ring_font_label()
+            self.update_display()
+
+    def _sync_anchored_measurements(self):
+        """Keep the start of centre-anchored measurements on the current beam centre."""
+        if self.image_type != "diffraction":
+            return
+        anchored = [m for m in self.overlay_renderer.measurements if m.get("anchor_center")]
+        if not anchored:
+            return
+        center = self._beam_center_current()
+        if center is None:
+            return
+        for m in anchored:
+            m["start"] = (float(center[0]), float(center[1]))
+
     def _cancel_beam_pick(self):
         if hasattr(self, "pick_beam_center_btn") and self.pick_beam_center_btn.isChecked():
             self.pick_beam_center_btn.blockSignals(True)
@@ -2004,6 +2140,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     def on_beam_center_pick_toggled(self, checked: bool):
         self._beam_pick_active = checked
         if checked:
+            self._cancel_ring_label_drag()
             for btn_name in ("draw_measurement_btn", "move_line_btn", "move_label_btn", "move_scalebar_btn",
                              "manual_crop_select_btn", "manual_crop_move_btn"):
                 btn = getattr(self, btn_name, None)
@@ -2087,13 +2224,17 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self.ring_list.blockSignals(False)
 
     def _ring_entries_from_list(self) -> list:
+        """Rebuild ring entries from the list widget, keeping existing per-ring extras
+        (e.g. manual label positions)."""
+        existing = {round(float(e["d"]), 6): e for e in self.overlay_renderer.ring_resolutions}
         entries = []
         for row in range(self.ring_list.count()):
             item = self.ring_list.item(row)
-            entries.append({
-                "d": float(item.data(Qt.ItemDataRole.UserRole)),
-                "enabled": item.checkState() == Qt.CheckState.Checked,
-            })
+            d = float(item.data(Qt.ItemDataRole.UserRole))
+            entry = dict(existing.get(round(d, 6), {}))
+            entry["d"] = d
+            entry["enabled"] = item.checkState() == Qt.CheckState.Checked
+            entries.append(entry)
         return entries
 
     def on_ring_item_changed(self, _item):
@@ -2159,6 +2300,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             return
         
         # Get current image with overlays
+        self._sync_anchored_measurements()
         diffraction = self.current_diffraction_geometry()
         q_image = self.overlay_renderer.render_image_with_overlays(
             self.image_processor.get_current_image(),

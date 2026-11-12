@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from qtpy.QtGui import QColor
+from qtpy.QtGui import QColor, QFont
 
 from core.diffraction import RECIPROCAL_MEASUREMENT_UNITS, RECIPROCAL_UNITS
 from gui.custom_widgets import set_color_button_indicator
@@ -78,11 +78,26 @@ class AppStateManager:
                     continue
                 if d > 0 and d == d and d != float("inf"):
                     enabled = bool(entry.get("enabled", True)) if isinstance(entry, dict) else True
-                    parsed.append({"d": d, "enabled": enabled})
+                    ring = {"d": d, "enabled": enabled}
+                    if isinstance(entry, dict) and entry.get("label_angle") is not None:
+                        try:
+                            angle = float(entry["label_angle"])
+                            radial = float(entry.get("label_radial", 0.0))
+                            if all(v == v and abs(v) != float("inf") for v in (angle, radial)):
+                                ring["label_angle"] = angle
+                                ring["label_radial"] = radial
+                        except (TypeError, ValueError):
+                            pass
+                    parsed.append(ring)
             renderer.ring_resolutions = parsed
         renderer.ring_color = _as_color("ring_color", renderer.ring_color)
         renderer.ring_line_width = _as_int("ring_line_width", renderer.ring_line_width, 1, 20)
         renderer.ring_show_labels = _as_bool("ring_show_labels", renderer.ring_show_labels)
+        ring_font_text = settings.get("ring_font")
+        if isinstance(ring_font_text, str) and ring_font_text:
+            font = QFont()
+            if font.fromString(ring_font_text):
+                renderer.ring_font = font
         renderer.beam_center_marker_enabled = _as_bool("beam_center_marker_enabled", renderer.beam_center_marker_enabled)
 
         renderer.aperture_enabled = _as_bool("aperture_enabled", renderer.aperture_enabled)
@@ -123,6 +138,7 @@ class AppStateManager:
         editor.beam_marker_checkbox.setChecked(bool(renderer.beam_center_marker_enabled))
         set_color_button_indicator(editor.ring_color_btn, renderer.ring_color)
         editor._populate_ring_list()
+        editor._update_ring_font_label()
 
         editor.aperture_checkbox.setChecked(renderer.aperture_enabled)
         editor.aperture_size_combo.setCurrentText(str(renderer.aperture_nominal_size))
@@ -189,9 +205,15 @@ class AppStateManager:
                 "recip_measurement_unit": str(renderer.recip_measurement_unit),
                 "rings_enabled": bool(renderer.rings_enabled),
                 "ring_resolutions": [
-                    {"d": float(r["d"]), "enabled": bool(r.get("enabled", True))}
+                    {
+                        "d": float(r["d"]),
+                        "enabled": bool(r.get("enabled", True)),
+                        **({"label_angle": float(r["label_angle"]), "label_radial": float(r.get("label_radial", 0.0))}
+                           if r.get("label_angle") is not None else {}),
+                    }
                     for r in renderer.ring_resolutions
                 ],
+                "ring_font": renderer._ring_font().toString(),
                 "ring_color": renderer.ring_color.name(),
                 "ring_line_width": int(renderer.ring_line_width),
                 "ring_show_labels": bool(renderer.ring_show_labels),

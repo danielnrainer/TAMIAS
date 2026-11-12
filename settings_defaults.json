@@ -26,7 +26,7 @@
     "scalebar_bg_opacity": 255,
     "recip_scalebar_unit": "Å⁻¹",
     "recip_scalebar_length_value": 0.5,
-    "recip_measurement_unit": "Å⁻¹",
+    "recip_measurement_unit": "Resolution (Å)",
     "rings_enabled": false,
     "ring_resolutions": [
       {

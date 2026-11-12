@@ -21,7 +21,7 @@ If you encounter any issue and would like to report it or have a feature request
 - **Aperture Overlay**: Visualize SAED aperture sizes on images
 - **Diffraction Patterns**: Annotate electron diffraction patterns (reciprocal space) with calibrated reciprocal-space scalebars (Å⁻¹ / nm⁻¹), resolution rings (presets 0.8, 1.0, 1.2, 2.0 Å plus custom d-spacings) and reciprocal-space measurements; camera length, wavelength, pixel size and beam centre read from `.rodhypix` headers or entered manually (see [Diffraction Patterns](#diffraction-patterns))
 - **Intensity Scaling**: Linear, square-root or logarithmic display mapping (logarithmic reveals weak reflections next to the direct beam)
-- **Particle Measurement**: Draw and annotate dimensions directly on the image with per-measurement style control
+- **Measurement**: Draw and annotate dimensions directly on the image with per-measurement style control
   - Draw measurement lines
   - Move full lines
   - Move labels independently
@@ -105,7 +105,7 @@ At runtime, user-specific files in `%APPDATA%/TAMIAS` override these shipped def
 5. Configure scalebar settings (length, position, colors)
 6. Add overlay of selected-area aperture (calibrated sizes)
 7. Optionally add particle measurements:
-  - Enable **Particle Measurement**
+  - Enable **Measurement**
   - Click **✏ Draw Measurement** and drag
   - Use **↔ Move Line** to reposition a line
   - Use **☰ Move Label** to reposition labels
@@ -124,8 +124,8 @@ Select **Image type → Diffraction pattern** at the top of the control panel. W
 - **Diffraction Calibration**: camera length (detector distance, `distance_mm`), wavelength (`alpha12_wavelength`) and detector pixel size (`real_px_size`) are taken from the `.rodhypix` header when *Use file header values where available* is ticked; untick it (or load a file without a header, e.g. TIFF) to enter your own. *From kV…* sets the relativistic electron wavelength for 80/120/200/300 kV.
 - **Beam centre**: initialised from the header beam origin (or the image centre), and kept correct through crops and flips. Use **⌖ Pick on Image** to click the direct beam; with *Snap to nearby intensity peak* the click is refined to the intensity-weighted centre of the brightest spot within 15 px. *Note: the CrysAlisPro header origin is often the nominal detector centre rather than the refined beam position, so picking is recommended.*
 - **Scalebar**: in Å⁻¹ or nm⁻¹ (1 Å⁻¹ = 10 nm⁻¹).
-- **Resolution Rings**: replace the aperture overlay. Tick/untick rings in the list, add custom d-spacings (Å), and set colour, line width and labels. Optionally mark the beam centre.
-- **Measurements**: report the reciprocal distance between the two end points in Å⁻¹ or nm⁻¹, or the corresponding d-spacing *d* = 1/|Δs| in Å. A line from the beam centre to a reflection gives that reflection's 1/*d* (or *d*).
+- **Resolution Rings**: replace the aperture overlay. Tick/untick rings in the list, add custom d-spacings (Å), and set colour, line width, label font and labels. Use **☰ Move Ring Labels** to drag labels anywhere (positions are stored relative to their ring, so they follow it if the calibration or beam centre changes; *Reset Positions* returns to automatic placement). Optionally mark the beam centre.
+- **Measurements**: with *Start lines at beam centre* (default) each new line starts at the beam centre and follows it if the centre is moved, so its label gives the resolution of the reflection at the end point; *Snap end to nearest peak* refines the end point to the spot's intensity centre. *Label shows* selects **Resolution (Å)** (default, *d* = 1/|Δs|) or the reciprocal length |Δs| in Å⁻¹ or nm⁻¹. Lines between two spots give the length (or d-spacing) of the difference vector.
 - **Intensity scaling** defaults to *Logarithmic* for diffraction patterns (Brightness/Contrast section).
 
 **Conventions and formulas** (flat detector perpendicular to the beam, camera length *L*, pixel size *p*, wavelength *λ*):
@@ -192,7 +192,7 @@ TAMIAS/
   - In batch mode, Auto uses each file's own header pixel size; files without one use the batch dialog's **Fallback preset** (default Standard). The pixel size field is only editable when the selected (or fallback) preset is Custom
 - **Architecture**: Modular design with separate core, GUI, and utility modules, with crop and batch workflows split into dedicated modules
 - **UI**: Collapsible sections and scrollable batch controls for efficient screen space management
-- **Particle Measurement**: Click-and-drag lines with auto-computed length labels; per-measurement line/text styles, cap styles, width, and label visibility; label positions stored as per-measurement image-pixel offsets and fully repositionable via drag
+- **Measurement**: Click-and-drag lines with auto-computed length labels; per-measurement line/text styles, cap styles, width, and label visibility; label positions stored as per-measurement image-pixel offsets and fully repositionable via drag
 
 ## Acknowledgments
 
