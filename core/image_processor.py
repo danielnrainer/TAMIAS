@@ -3,6 +3,7 @@ Image processing module for TEM Image Editor.
 Handles image loading, transformations, and brightness/contrast adjustments.
 """
 
+import math
 from typing import Optional, Tuple, Dict
 import numpy as np
 from PIL import Image
@@ -21,6 +22,11 @@ class ImageProcessor:
         self.file_pixel_size_nm: Optional[float] = None  # Direct-space pixel size from file header
         self.min_val = 0
         self.max_val = 255
+        # Raw -> 8-bit display mapping: "Linear" (min-max), "Square root" or "Logarithmic"
+        self.intensity_scaling = "Linear"
+        # Affine map from as-loaded pixel coords to current (cropped/flipped) coords:
+        # x_cur = sx * x_loaded + tx,  y_cur = sy * y_loaded + ty
+        self._geom = (1.0, 0.0, 1.0, 0.0)
         
     def load_image(self, file_path: str) -> Tuple[bool, Optional[str], Optional[Tuple[int, int]]]:
         """
@@ -33,10 +39,14 @@ class ImageProcessor:
         (see get_file_pixel_size_nm). TIFF and other formats carry no such calibration;
         use imaging-mode presets for those.
         """
+        # Snapshot so a failed load leaves the image on screen (and its header/geometry) intact
+        previous_state = (self.original_image, self.raw_image, self.current_image, self.input_dpi,
+                          self.rod_header_info, self.file_pixel_size_nm, self._geom)
         try:
             file_ext = Path(file_path).suffix.lower()
             self.rod_header_info = None
             self.file_pixel_size_nm = None
+            self._geom = (1.0, 0.0, 1.0, 0.0)
 
             # Check if it's a .rodhypix file
             if file_ext == '.rodhypix':
@@ -115,54 +125,7 @@ class ImageProcessor:
             print(f"Image range: min={np.min(self.original_image):.2f}, max={np.max(self.original_image):.2f}")
             print(f"Image mean: {np.mean(self.original_image):.2f}")
             
-            # Handle different bit depths and normalize to 8-bit
-            if self.original_image.dtype == np.uint16:
-                # 16-bit unsigned integer
-                img_min = np.min(self.original_image)
-                img_max = np.max(self.original_image)
-                print(f"16-bit image detected, normalizing range [{img_min}, {img_max}] to [0, 255]")
-                
-                if img_max > img_min:
-                    normalized = (self.original_image.astype(np.float32) - img_min) / (img_max - img_min) * 255
-                    self.original_image = normalized.astype(np.uint8)
-                else:
-                    self.original_image = np.zeros_like(self.original_image, dtype=np.uint8)
-                    
-            elif self.original_image.dtype in [np.float32, np.float64]:
-                # 32-bit or 64-bit float
-                img_min = np.min(self.original_image)
-                img_max = np.max(self.original_image)
-                print(f"Float image detected, normalizing range [{img_min:.4f}, {img_max:.4f}] to [0, 255]")
-                
-                if img_max > img_min:
-                    normalized = (self.original_image - img_min) / (img_max - img_min) * 255
-                    self.original_image = normalized.astype(np.uint8)
-                else:
-                    self.original_image = np.zeros((self.original_image.shape), dtype=np.uint8)
-                    
-            elif self.original_image.dtype == np.uint32 or self.original_image.dtype == np.int32:
-                # 32-bit integer
-                img_min = np.min(self.original_image)
-                img_max = np.max(self.original_image)
-                print(f"32-bit integer image detected, normalizing range [{img_min}, {img_max}] to [0, 255]")
-                
-                if img_max > img_min:
-                    normalized = (self.original_image.astype(np.float64) - img_min) / (img_max - img_min) * 255
-                    self.original_image = normalized.astype(np.uint8)
-                else:
-                    self.original_image = np.zeros((self.original_image.shape), dtype=np.uint8)
-            
-            # If already 8-bit, use as-is
-            elif self.original_image.dtype != np.uint8:
-                # Fallback for any other type
-                print(f"Unknown dtype {self.original_image.dtype}, converting to uint8")
-                img_min = np.min(self.original_image)
-                img_max = np.max(self.original_image)
-                if img_max > img_min:
-                    normalized = (self.original_image.astype(np.float64) - img_min) / (img_max - img_min) * 255
-                    self.original_image = normalized.astype(np.uint8)
-                else:
-                    self.original_image = np.zeros((self.original_image.shape), dtype=np.uint8)
+            self._normalize_from_raw()
             
             print(f"After normalization: dtype={self.original_image.dtype}, range=[{np.min(self.original_image)}, {np.max(self.original_image)}]")
             
@@ -174,8 +137,125 @@ class ImageProcessor:
             return True, None, (width, height)
 
         except Exception as e:
+            (self.original_image, self.raw_image, self.current_image, self.input_dpi,
+             self.rod_header_info, self.file_pixel_size_nm, self._geom) = previous_state
             return False, str(e), None
     
+    INTENSITY_SCALING_MODES = ("Linear", "Square root", "Logarithmic")
+
+    def _normalize_from_raw(self):
+        """(Re)build the 8-bit `original_image` from `raw_image` using `intensity_scaling`.
+
+        Linear keeps the historical behaviour (8-bit data untouched, other dtypes min-max
+        stretched). Square root / Logarithmic compress the dynamic range, which diffraction
+        patterns need: the direct beam can be ~10^5 counts while reflections are ~10-100.
+        """
+        raw = self.raw_image
+        if raw is None:
+            return
+        mode = self.intensity_scaling if self.intensity_scaling in self.INTENSITY_SCALING_MODES else "Linear"
+
+        if mode == "Linear":
+            if raw.dtype == np.uint8:
+                self.original_image = raw.copy()
+                return
+            img_min = np.min(raw)
+            img_max = np.max(raw)
+            print(f"{raw.dtype} image detected, normalizing range [{img_min}, {img_max}] to [0, 255]")
+            if img_max > img_min:
+                normalized = (raw.astype(np.float64) - img_min) / (float(img_max) - float(img_min)) * 255.0
+                self.original_image = normalized.astype(np.uint8)
+            else:
+                self.original_image = np.zeros(raw.shape, dtype=np.uint8)
+            return
+
+        data = raw.astype(np.float64)
+        data -= np.min(data)  # >= 0 (also lifts masked pixels, e.g. -1 in .rodhypix)
+        data = np.sqrt(data) if mode == "Square root" else np.log1p(data)
+        top = float(np.max(data))
+        if top > 0:
+            self.original_image = (data / top * 255.0).astype(np.uint8)
+        else:
+            self.original_image = np.zeros(raw.shape, dtype=np.uint8)
+
+    def set_intensity_scaling(self, mode: str) -> bool:
+        """Change the raw -> display mapping and rebuild the display image.
+
+        Returns True if the image was rebuilt. Brightness/contrast are kept; callers usually
+        follow up with auto_adjust_contrast().
+        """
+        if mode not in self.INTENSITY_SCALING_MODES:
+            return False
+        self.intensity_scaling = mode
+        if self.raw_image is None or self.original_image is None:
+            return False
+        if self.raw_image.shape != self.original_image.shape:
+            return False
+        self._normalize_from_raw()
+        self.apply_brightness_contrast()
+        return True
+
+    # --- Geometry bookkeeping (crop / flip) ---------------------------------------------
+
+    def map_loaded_to_current(self, x: float, y: float) -> Tuple[float, float]:
+        """Map pixel-corner coords of the image as loaded to the current (cropped/flipped) image."""
+        sx, tx, sy, ty = self._geom
+        return (sx * float(x) + tx, sy * float(y) + ty)
+
+    def map_current_to_loaded(self, x: float, y: float) -> Tuple[float, float]:
+        """Inverse of map_loaded_to_current."""
+        sx, tx, sy, ty = self._geom
+        return ((float(x) - tx) / sx, (float(y) - ty) / sy)
+
+    def _geom_translate(self, dx: float, dy: float):
+        sx, tx, sy, ty = self._geom
+        self._geom = (sx, tx + dx, sy, ty + dy)
+
+    def refine_peak_centroid(self, x: float, y: float, search_radius: int = 15,
+                             centroid_radius: int = 6, iterations: int = 3) -> Optional[Tuple[float, float]]:
+        """Snap a point to the nearby intensity peak (e.g. the direct beam).
+
+        Finds the brightest pixel of the raw data within `search_radius` of (x, y), then
+        computes the background-subtracted intensity-weighted centroid within
+        `centroid_radius`, re-centring the box on the previous centroid `iterations` times
+        (avoids bias from a box centred on a noisy/saturated maximum). Result is in
+        pixel-corner coordinates (pixel centre = index + 0.5). Returns None if there is no
+        usable signal.
+        """
+        if not (math.isfinite(float(x)) and math.isfinite(float(y))):
+            return None
+        data = self.raw_image if self.raw_image is not None else self.original_image
+        if data is None or self.original_image is None or data.shape != self.original_image.shape:
+            return None
+        h, w = data.shape
+        cx, cy = int(math.floor(x)), int(math.floor(y))
+        x0, x1 = max(0, cx - search_radius), min(w, cx + search_radius + 1)
+        y0, y1 = max(0, cy - search_radius), min(h, cy + search_radius + 1)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        window = data[y0:y1, x0:x1].astype(np.float64)
+        background = float(np.median(window))
+        iy, ix = np.unravel_index(int(np.argmax(window)), window.shape)
+        if window[iy, ix] - background <= 0:
+            return None
+        centre = (x0 + ix + 0.5, y0 + iy + 0.5)
+        for _ in range(max(1, int(iterations))):
+            px, py = int(math.floor(centre[0])), int(math.floor(centre[1]))
+            a0, a1 = max(0, px - centroid_radius), min(w, px + centroid_radius + 1)
+            b0, b1 = max(0, py - centroid_radius), min(h, py + centroid_radius + 1)
+            patch = np.clip(data[b0:b1, a0:a1].astype(np.float64) - background, 0.0, None)
+            total = float(patch.sum())
+            if total <= 0:
+                break
+            yy, xx = np.mgrid[b0:b1, a0:a1]
+            centre = (float((patch * (xx + 0.5)).sum() / total), float((patch * (yy + 0.5)).sum() / total))
+        return centre
+
+    def get_header_diffraction_geometry(self) -> Dict:
+        """Diffraction calibration values found in the file header (see core.diffraction)."""
+        from core.diffraction import resolve_header_geometry
+        return resolve_header_geometry(self.rod_header_info)
+
     def auto_adjust_contrast(self):
         """Automatically adjust brightness/contrast based on image histogram."""
         if self.original_image is None:
@@ -241,15 +321,25 @@ class ImageProcessor:
         if self.original_image is None:
             return
         
+        width = self.original_image.shape[1]
+        if self.raw_image is not None and self.raw_image.shape == self.original_image.shape:
+            self.raw_image = np.fliplr(self.raw_image)
         self.original_image = np.fliplr(self.original_image)
+        sx, tx, sy, ty = self._geom
+        self._geom = (-sx, float(width) - tx, sy, ty)  # x' = W - x
         self.apply_brightness_contrast()
-    
+
     def flip_vertical(self):
         """Flip the image vertically (top-bottom)."""
         if self.original_image is None:
             return
-        
+
+        height = self.original_image.shape[0]
+        if self.raw_image is not None and self.raw_image.shape == self.original_image.shape:
+            self.raw_image = np.flipud(self.raw_image)
         self.original_image = np.flipud(self.original_image)
+        sx, tx, sy, ty = self._geom
+        self._geom = (sx, tx, -sy, float(height) - ty)  # y' = H - y
         self.apply_brightness_contrast()
 
     def crop_rows(self, top_rows: int, bottom_rows: int) -> Tuple[bool, Optional[str], Optional[Tuple[int, int]]]:
@@ -280,6 +370,7 @@ class ImageProcessor:
         self.original_image = self.original_image[start:end, :].copy()
         if self.raw_image is not None and self.raw_image.shape[0] == height:
             self.raw_image = self.raw_image[start:end, :].copy()
+        self._geom_translate(0.0, -float(top_rows))
         self.apply_brightness_contrast()
 
         new_height, new_width = self.original_image.shape
@@ -315,6 +406,7 @@ class ImageProcessor:
         self.original_image = self.original_image[top:bottom, left:right].copy()
         if self.raw_image is not None and self.raw_image.shape == (height, width):
             self.raw_image = self.raw_image[top:bottom, left:right].copy()
+        self._geom_translate(-float(left), -float(top))
         self.apply_brightness_contrast()
 
         new_height, new_width = self.original_image.shape

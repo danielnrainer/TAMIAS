@@ -21,6 +21,9 @@ class MeasurementInteractionController:
             return
         if e.crop_handle_mouse_press(x, y):
             return
+        if getattr(e, "_beam_pick_active", False):
+            e.handle_beam_center_click(x, y)
+            return
         if e._scalebar_drag_active:
             self.start_scalebar_drag(x, y)
             return
@@ -116,7 +119,9 @@ class MeasurementInteractionController:
         img_x, img_y = float(mapped[0]), float(mapped[1])
 
         img_w, img_h = e._last_rendered_image_size
-        rect = e.overlay_renderer.get_scalebar_box_rect(img_w, img_h, e.nm_per_pixel)
+        rect = e.overlay_renderer.get_scalebar_box_rect(
+            img_w, img_h, e.nm_per_pixel, e.current_diffraction_geometry()
+        )
         if rect is None:
             return
 

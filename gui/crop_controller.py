@@ -317,6 +317,7 @@ class CropControllerMixin:
         """Toggle manual rectangle selection mode for cropping."""
         self._manual_crop_mode_active = checked
         if checked:
+            self._cancel_beam_pick()
             if hasattr(self, "manual_crop_move_btn") and self.manual_crop_move_btn.isChecked():
                 self.manual_crop_move_btn.blockSignals(True)
                 self.manual_crop_move_btn.setChecked(False)
@@ -359,6 +360,7 @@ class CropControllerMixin:
                 self.manual_crop_move_btn.blockSignals(False)
                 QMessageBox.information(self, "Manual Crop", "Disable centered selection before moving the crop region.")
                 return
+            self._cancel_beam_pick()
             if hasattr(self, "manual_crop_select_btn") and self.manual_crop_select_btn.isChecked():
                 self.manual_crop_select_btn.blockSignals(True)
                 self.manual_crop_select_btn.setChecked(False)

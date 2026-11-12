@@ -19,6 +19,8 @@ If you encounter any issue and would like to report it or have a feature request
 - **Cropping Tools**: Batch top/bottom row crop plus interactive manual crop with square/aspect controls and drag/move support
 - **Smart Scalebars**: Calibrated scalebars with customizable appearance (length, thickness, position, colors, font, background box)
 - **Aperture Overlay**: Visualize SAED aperture sizes on images
+- **Diffraction Patterns**: Annotate electron diffraction patterns (reciprocal space) with calibrated reciprocal-space scalebars (Å⁻¹ / nm⁻¹), resolution rings (presets 0.8, 1.0, 1.2, 2.0 Å plus custom d-spacings) and reciprocal-space measurements; camera length, wavelength, pixel size and beam centre read from `.rodhypix` headers or entered manually (see [Diffraction Patterns](#diffraction-patterns))
+- **Intensity Scaling**: Linear, square-root or logarithmic display mapping (logarithmic reveals weak reflections next to the direct beam)
 - **Particle Measurement**: Draw and annotate dimensions directly on the image with per-measurement style control
   - Draw measurement lines
   - Move full lines
@@ -113,6 +115,25 @@ At runtime, user-specific files in `%APPDATA%/TAMIAS` override these shipped def
 **Batch Processing:**
 - File → Batch Processing (Ctrl+B)
 - Add images, configure crop/overlay/export settings, and process all at once
+- Set **Image type** to *Diffraction pattern* to batch-annotate diffraction frames (per-file header calibration and beam centre, with manual fallbacks)
+
+### Diffraction Patterns
+
+Select **Image type → Diffraction pattern** at the top of the control panel. When a `.rodhypix` file has no direct-space pixel size in its header (as is the case for diffraction frames) TAMIAS offers to switch for you.
+
+- **Diffraction Calibration**: camera length (detector distance, `distance_mm`), wavelength (`alpha12_wavelength`) and detector pixel size (`real_px_size`) are taken from the `.rodhypix` header when *Use file header values where available* is ticked; untick it (or load a file without a header, e.g. TIFF) to enter your own. *From kV…* sets the relativistic electron wavelength for 80/120/200/300 kV.
+- **Beam centre**: initialised from the header beam origin (or the image centre), and kept correct through crops and flips. Use **⌖ Pick on Image** to click the direct beam; with *Snap to nearby intensity peak* the click is refined to the intensity-weighted centre of the brightest spot within 15 px. *Note: the CrysAlisPro header origin is often the nominal detector centre rather than the refined beam position, so picking is recommended.*
+- **Scalebar**: in Å⁻¹ or nm⁻¹ (1 Å⁻¹ = 10 nm⁻¹).
+- **Resolution Rings**: replace the aperture overlay. Tick/untick rings in the list, add custom d-spacings (Å), and set colour, line width and labels. Optionally mark the beam centre.
+- **Measurements**: report the reciprocal distance between the two end points in Å⁻¹ or nm⁻¹, or the corresponding d-spacing *d* = 1/|Δs| in Å. A line from the beam centre to a reflection gives that reflection's 1/*d* (or *d*).
+- **Intensity scaling** defaults to *Logarithmic* for diffraction patterns (Brightness/Contrast section).
+
+**Conventions and formulas** (flat detector perpendicular to the beam, camera length *L*, pixel size *p*, wavelength *λ*):
+- Reciprocal lengths use the crystallographic convention |**s**| = 1/*d* = 2 sin θ / λ (no factor 2π).
+- Resolution ring radius: sin θ = λ / 2*d*, *R* = *L* tan 2θ, radius in pixels = *R* / *p* (exact; rings with λ/2*d* > 1 or 2θ ≥ 90° are not drawn).
+- Measurements: exact difference of the two scattering vectors on the Ewald sphere, **s** = **k**_out − **k**_in with |**k**| = 1/λ.
+- Scalebar: linear calibration at the beam centre, *p* / (λ *L*) Å⁻¹ per pixel. Away from the centre the linear value of 1/*d* differs from the exact one by ≈ 3/8 (*R*/*L*)², i.e. < 0.05 % out to 0.8 Å at 200 kV on the Synergy-ED.
+- Detector/beam tilts are not modelled; TAMIAS warns if the header reports one.
 
 ## Project Structure
 
@@ -120,8 +141,9 @@ At runtime, user-specific files in `%APPDATA%/TAMIAS` override these shipped def
 TAMIAS/
 ├── core/                           # Core processing modules
 │   ├── crop_geometry.py            # Crop geometry helpers
+│   ├── diffraction.py              # Reciprocal-space geometry (rings, scalebar, measurements)
 │   ├── image_processor.py          # Image loading and adjustments
-│   └── overlay_renderer.py         # Scalebar, aperture and measurement rendering
+│   └── overlay_renderer.py         # Scalebar, aperture, resolution ring and measurement rendering
 ├── gui/                            # GUI components
 │   ├── app_state_manager.py        # Main-window UI state orchestration
 │   ├── batch_processing_dialog.py  # Batch processing dialog
@@ -132,6 +154,7 @@ TAMIAS/
 │   ├── measurement_interaction.py  # Measurement draw/drag interaction controller
 │   ├── theme_manager.py            # Theme application and OS sync
 │   └── ui_sections.py              # Extracted setup-section builders for main UI
+├── tests/                          # Unit tests (python -m pytest tests)
 ├── utils/                          # Utility modules
 │   ├── app_settings_manager.py     # Persistent app settings storage
 │   ├── imaging_mode_defaults.py    # Defaults for unit and scalebar length for each image mode
@@ -160,7 +183,8 @@ TAMIAS/
 
 - **Image Processing**: 8-bit grayscale (16-bit images auto-normalized)
 - **Cropping**: Top/bottom row crop and interactive manual crop are available before overlay rendering
-- **Scalebar Calculation**: Accounts for nm/pixel calibration
+- **Scalebar Calculation**: Accounts for nm/pixel calibration (real space) or the reciprocal-space calibration p/(λL) (diffraction); the bar is drawn with sub-pixel length, and is not drawn if the requested length does not fit in the image
+- **Diffraction header values**: follow DIALS' `FormatROD` conventions (pixel size as stored, beam origin divided by binning, pixel-corner coordinates)
 - **RODHyPix Support**:
   - Read via the [rodhypix](https://pypi.org/project/rodhypix/) package (BSD 3-Clause)
   - Direct-space pixel size (`direct_space_pixel_size_nm`) read from the file header; used by the **Auto (from file)** imaging mode. If a file has no valid value (stored as 0), the imaging mode switches to the `Standard` preset automatically (and back to Auto when the next file has a header value, unless a preset was chosen manually)

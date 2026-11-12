@@ -27,6 +27,17 @@ from qtpy.QtWidgets import QColorDialog, QFontDialog
 from core.image_processor import ImageProcessor
 from core.overlay_renderer import OverlayRenderer
 from core.crop_geometry import compute_display_mapping, map_label_to_image_coords, point_to_segment_distance
+from core.diffraction import (
+    D_SPACING_ANGSTROM,
+    DEFAULT_RING_RESOLUTIONS,
+    RECIPROCAL_MEASUREMENT_UNITS,
+    RECIPROCAL_UNITS,
+    DiffractionGeometry,
+    electron_wavelength_angstrom,
+    format_reciprocal_value,
+    format_resolution_label,
+    looks_like_diffraction_header,
+)
 from utils.preset_manager import PresetManager, PresetStorage
 from utils.app_settings_manager import AppSettingsStorage
 from utils.imaging_mode_defaults import (
@@ -103,6 +114,15 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self._scalebar_drag_offset_start: tuple[float, float] = (0.0, 0.0)
         self._init_crop_state()
         self._last_rendered_image_size: Optional[tuple[int, int]] = None
+
+        # Diffraction (reciprocal-space) state
+        self.image_type = "real"  # "real" or "diffraction"
+        self._beam_center_loaded: Optional[tuple[float, float]] = None  # as-loaded pixel coords
+        self._beam_pick_active = False
+        self._diffraction_manual = {"camera_length_mm": 650.0, "wavelength_angstrom": 0.0251, "pixel_size_um": 100.0}
+        self._intensity_scaling_by_type = {"real": "Linear", "diffraction": "Logarithmic"}
+        self._scalebar_text_raw_by_type: dict[str, Optional[str]] = {"real": None, "diffraction": None}
+        self._syncing_diffraction_controls = False
         
         # Load presets
         default_payload = PresetStorage.get_default_payload()
@@ -128,6 +148,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             self.crop_bottom_spinbox.valueChanged.connect(self._on_crop_defaults_changed)
 
         self._apply_overlay_settings_to_controls()
+        self._apply_diffraction_settings(self._app_settings.get("diffraction", {}))
         self._restore_window_state_from_settings()
 
         # Theme mode: auto follows the OS color scheme.
@@ -367,8 +388,12 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self.batch_input_directory = str(self._app_settings.get("batch_input_directory", ""))
         self.batch_output_directory = str(self._app_settings.get("batch_output_directory", ""))
 
+        # Controls must show real-space values while the (real-space) overlay defaults are
+        # synced into them, otherwise the reciprocal scalebar length gets overwritten.
+        self.set_image_type("real", initial=True)
         self._apply_overlay_settings(self._app_settings.get("overlay", {}))
         self._apply_overlay_settings_to_controls()
+        self._apply_diffraction_settings(self._app_settings.get("diffraction", {}))
 
         saved_theme = str(self._app_settings.get("theme_mode", "auto"))
         self._theme_mode = saved_theme if saved_theme in {"auto", "light", "dark"} else "auto"
@@ -583,8 +608,12 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         controls_layout = QVBoxLayout()
         controls_widget.setLayout(controls_layout)
         
-        # Imaging mode preset
+        # Real-space image vs diffraction pattern
+        ui_sections.setup_image_type_controls(self, controls_layout)
+
+        # Imaging mode preset (real space) / diffraction calibration (reciprocal space)
         self._setup_preset_controls(controls_layout)
+        ui_sections.setup_diffraction_calibration_controls(self, controls_layout)
 
         # Image cropping controls
         self._setup_crop_controls(controls_layout)
@@ -598,8 +627,9 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         # Scalebar controls
         self._setup_scalebar_controls(controls_layout)
         
-        # Aperture controls
+        # Aperture controls (real space) / resolution rings (diffraction)
         self._setup_aperture_controls(controls_layout)
+        ui_sections.setup_resolution_ring_controls(self, controls_layout)
 
         # Particle measurement controls
         self._setup_measurement_controls(controls_layout)
@@ -702,6 +732,9 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
                 # Auto mode: (re)calibrate from the new file's header, else fall back to a preset
                 self._select_calibration_for_loaded_file()
+
+                # Diffraction: beam centre / calibration from the new header; image-type hint
+                self._on_image_loaded_diffraction()
             else:
                 QMessageBox.critical(self, "Error", f"Failed to load image:\n{error}")
 
@@ -747,6 +780,17 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         self.nm_per_pixel = npp
         self._update_calibration_source_label()
         mode_unit = defaults["unit"] if defaults is not None else None
+
+        if self.image_type == "diffraction":
+            # The unit/length widgets show reciprocal-space values right now: only update the
+            # stored real-space values so they are restored when switching back.
+            if defaults is not None:
+                self.overlay_renderer.scalebar_unit = defaults["unit"]
+                self.overlay_renderer.scalebar_length_value = float(defaults["scalebar_length_value"])
+                self._scalebar_text_raw_by_type["real"] = defaults["scalebar_length_text"]
+                self.overlay_renderer.measurement_unit = defaults["unit"]
+            self._refresh_scale_information()
+            return
 
         # Set preset-specific scalebar defaults (only if UI is fully initialized)
         if defaults is not None and hasattr(self, 'unit_combo') and hasattr(self, 'scalebar_length_spinbox'):
@@ -844,6 +888,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     def _refresh_scale_information(self):
         """Refresh scale-dependent UI and overlays after calibration or preset updates."""
         self._update_pixel_size_display()
+        self._sync_beam_center_controls()
         self._update_measurement_info_label()
         if hasattr(self, 'scalebar_length_spinbox'):
             self.on_scalebar_changed()
@@ -926,11 +971,15 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     def flip_horizontal(self):
         """Flip image horizontally."""
         self.image_processor.flip_horizontal()
+        self._sync_beam_center_controls()
+        self._update_measurement_info_label()
         self.update_display()
-    
+
     def flip_vertical(self):
         """Flip image vertically."""
         self.image_processor.flip_vertical()
+        self._sync_beam_center_controls()
+        self._update_measurement_info_label()
         self.update_display()
     
     def on_scalebar_toggled(self, state):
@@ -944,8 +993,11 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     
     def on_scalebar_changed(self):
         """Handle scalebar parameter changes."""
-        # numeric value for pixel conversion
-        self.overlay_renderer.scalebar_length_value = float(self.scalebar_length_spinbox.value())
+        # numeric value for pixel conversion (stored per image type)
+        if self.image_type == "diffraction":
+            self.overlay_renderer.recip_scalebar_length_value = float(self.scalebar_length_spinbox.value())
+        else:
+            self.overlay_renderer.scalebar_length_value = float(self.scalebar_length_spinbox.value())
         self.overlay_renderer.scalebar_thickness = self.scalebar_thickness_spinbox.value()
         selected_position = self.position_combo.currentText()
         # Preset anchors are absolute to the full image; "custom" keeps current dragged offset.
@@ -980,7 +1032,11 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
     
     def on_scalebar_unit_changed(self, unit: str):
         """Handle scalebar unit change."""
-        self.overlay_renderer.scalebar_unit = unit
+        if self.image_type == "diffraction":
+            if unit in RECIPROCAL_UNITS:
+                self.overlay_renderer.recip_scalebar_unit = unit
+        elif unit in ("nm", "µm"):
+            self.overlay_renderer.scalebar_unit = unit
         # Update renderer label consistency
         self.on_scalebar_changed()
         self.update_display()
@@ -1088,7 +1144,12 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
 
     def on_measurement_changed(self):
         """Handle measurement style changes (unit, thickness, label visibility)."""
-        self.overlay_renderer.measurement_unit = self.measurement_unit_combo.currentText()
+        unit = self.measurement_unit_combo.currentText()
+        if self.image_type == "diffraction":
+            if unit in RECIPROCAL_MEASUREMENT_UNITS:
+                self.overlay_renderer.recip_measurement_unit = unit
+        elif unit in ("nm", "µm"):
+            self.overlay_renderer.measurement_unit = unit
         selected_rows = self._get_selected_measurement_rows()
         if selected_rows:
             for row in selected_rows:
@@ -1364,6 +1425,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             # Ensure the annotation overlay is active when drawing starts
             if not self.measurement_checkbox.isChecked():
                 self.measurement_checkbox.setChecked(True)
+            self._cancel_beam_pick()
+            self._refresh_image_interaction_mode()
             self.measurement_status_label.setText(
                 "Draw mode ON — click and drag on the image to add a measurement."
             )
@@ -1391,6 +1454,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             self.move_scalebar_btn.setChecked(False)
             self.move_scalebar_btn.blockSignals(False)
             self._scalebar_drag_active = False
+            self._cancel_beam_pick()
+            self._refresh_image_interaction_mode()
             self.measurement_status_label.setText(
                 "Move Label mode ON — click and drag any label to reposition it."
             )
@@ -1416,6 +1481,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             self.move_scalebar_btn.setChecked(False)
             self.move_scalebar_btn.blockSignals(False)
             self._scalebar_drag_active = False
+            self._cancel_beam_pick()
+            self._refresh_image_interaction_mode()
             self.measurement_status_label.setText(
                 "Move Line mode ON — click and drag a measurement line to reposition it."
             )
@@ -1441,6 +1508,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             self.move_line_btn.setChecked(False)
             self.move_line_btn.blockSignals(False)
             self._line_drag_active = False
+            self._cancel_beam_pick()
+            self._refresh_image_interaction_mode()
             self.measurement_status_label.setText(
                 "Move Scalebar mode ON — drag the scalebar box to reposition it."
             )
@@ -1456,7 +1525,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         if self.is_crop_draw_active():
             self.image_label.set_draw_mode(True)
             return
-        if self._draw_mode_active:
+        if self._beam_pick_active or self._draw_mode_active:
             self.image_label.set_draw_mode(True)
             return
         if self._label_drag_active or self._line_drag_active or self._scalebar_drag_active:
@@ -1556,7 +1625,7 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         if not hasattr(self, 'measurement_table'):
             return
         self.measurement_table.setRowCount(0)
-        unit = self.overlay_renderer.measurement_unit
+        diffraction = self.current_diffraction_geometry()
         for i, m in enumerate(self.overlay_renderer.measurements):
             if "start_cap" not in m:
                 m["start_cap"] = "head"
@@ -1574,11 +1643,15 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
                 m["text_color"] = QColor(self.overlay_renderer.measurement_text_color)
             if "line_width" not in m:
                 m["line_width"] = int(self.overlay_renderer.measurement_line_width)
-            dx = float(m["end"][0] - m["start"][0])
-            dy = float(m["end"][1] - m["start"][1])
-            length_nm = float(np.hypot(dx, dy)) * float(self.nm_per_pixel)
-            value = length_nm / 1000.0 if unit == "µm" else length_nm
-            length_text = f"{value:.1f} {unit}"
+            value, unit = self.overlay_renderer.measurement_value(
+                m["start"], m["end"], self.nm_per_pixel, diffraction
+            )
+            if diffraction is None:
+                length_text = f"{value:.1f} {unit}"
+            elif unit == "Å" and np.isfinite(value) and value < 100:
+                length_text = f"d = {value:.2f} {unit}"
+            else:
+                length_text = f"{format_reciprocal_value(value)} {unit}"
             line_color = QColor(m["line_color"])
             text_color = QColor(m["text_color"])
 
@@ -1628,19 +1701,483 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
         """Refresh the measurement list (kept for compatibility with existing call sites)."""
         self._refresh_measurements_list()
     
+    # ------------------------------------------------------------------------------------
+    # Diffraction patterns (reciprocal space)
+    # ------------------------------------------------------------------------------------
+
+    def _apply_diffraction_settings(self, settings: dict):
+        """Restore persisted diffraction settings and the last used image type."""
+        if not isinstance(settings, dict):
+            settings = {}
+
+        def _pos_float(key: str, current: float) -> float:
+            try:
+                value = float(settings.get(key, current))
+            except (TypeError, ValueError):
+                return current
+            return value if np.isfinite(value) and value > 0 else current
+
+        for key in ("camera_length_mm", "wavelength_angstrom", "pixel_size_um"):
+            self._diffraction_manual[key] = _pos_float(key, self._diffraction_manual[key])
+        for image_type in ("real", "diffraction"):
+            mode = str(settings.get(f"intensity_scaling_{image_type}", self._intensity_scaling_by_type[image_type]))
+            if mode in ImageProcessor.INTENSITY_SCALING_MODES:
+                self._intensity_scaling_by_type[image_type] = mode
+
+        self.diffraction_use_header_checkbox.blockSignals(True)
+        self.diffraction_use_header_checkbox.setChecked(bool(settings.get("use_header", True)))
+        self.diffraction_use_header_checkbox.blockSignals(False)
+        self.snap_beam_center_checkbox.setChecked(bool(settings.get("snap_beam_center", True)))
+
+        image_type = str(settings.get("image_type", "real"))
+        self.set_image_type(image_type if image_type in ("real", "diffraction") else "real", initial=True)
+
+    def _collect_diffraction_settings(self) -> dict:
+        return {
+            "image_type": self.image_type,
+            "use_header": bool(self.diffraction_use_header_checkbox.isChecked()),
+            "camera_length_mm": float(self._diffraction_manual["camera_length_mm"]),
+            "wavelength_angstrom": float(self._diffraction_manual["wavelength_angstrom"]),
+            "pixel_size_um": float(self._diffraction_manual["pixel_size_um"]),
+            "snap_beam_center": bool(self.snap_beam_center_checkbox.isChecked()),
+            "intensity_scaling_real": self._intensity_scaling_by_type["real"],
+            "intensity_scaling_diffraction": self._intensity_scaling_by_type["diffraction"],
+        }
+
+    def on_image_type_combo_changed(self, _index: int):
+        self.set_image_type(str(self.image_type_combo.currentData() or "real"))
+
+    def on_image_type_hint_clicked(self):
+        self.set_image_type("real" if self.image_type == "diffraction" else "diffraction")
+
+    def set_image_type(self, new_type: str, initial: bool = False):
+        """Switch between real-space images and diffraction patterns."""
+        if new_type not in ("real", "diffraction"):
+            new_type = "real"
+        old_type = self.image_type
+        if not initial and new_type == old_type:
+            return
+        if not initial:
+            self._scalebar_text_raw_by_type[old_type] = getattr(self, "scalebar_length_text_raw", None)
+        if self.pick_beam_center_btn.isChecked():
+            self.pick_beam_center_btn.setChecked(False)
+
+        self.image_type = new_type
+        diffraction = new_type == "diffraction"
+        renderer = self.overlay_renderer
+
+        index = self.image_type_combo.findData(new_type)
+        if index >= 0 and self.image_type_combo.currentIndex() != index:
+            self.image_type_combo.blockSignals(True)
+            self.image_type_combo.setCurrentIndex(index)
+            self.image_type_combo.blockSignals(False)
+
+        self.preset_box.setVisible(not diffraction)
+        self.aperture_box.setVisible(not diffraction)
+        self.diffraction_box.setVisible(diffraction)
+        self.rings_box.setVisible(diffraction)
+
+        # Unit selectors and scalebar length: each image type keeps its own values
+        self.unit_combo.blockSignals(True)
+        self.unit_combo.clear()
+        self.unit_combo.addItems(list(RECIPROCAL_UNITS) if diffraction else ["nm", "µm"])
+        self.unit_combo.setCurrentText(renderer.recip_scalebar_unit if diffraction else renderer.scalebar_unit)
+        self.unit_combo.blockSignals(False)
+
+        self.measurement_unit_combo.blockSignals(True)
+        self.measurement_unit_combo.clear()
+        self.measurement_unit_combo.addItems(list(RECIPROCAL_MEASUREMENT_UNITS) if diffraction else ["nm", "µm"])
+        self.measurement_unit_combo.setCurrentText(
+            renderer.recip_measurement_unit if diffraction else renderer.measurement_unit
+        )
+        self.measurement_unit_combo.blockSignals(False)
+
+        length = float(renderer.recip_scalebar_length_value if diffraction else renderer.scalebar_length_value)
+        raw = self._scalebar_text_raw_by_type.get(new_type)
+        try:
+            if raw is not None and abs(float(raw) - length) > 1e-9:
+                raw = None
+        except ValueError:
+            raw = None
+        self.scalebar_length_text_raw = raw
+        self.scalebar_length_spinbox.blockSignals(True)
+        self.scalebar_length_spinbox.setValue(length)
+        self.scalebar_length_spinbox.blockSignals(False)
+
+        mode = self._intensity_scaling_by_type[new_type]
+        self.intensity_scaling_combo.blockSignals(True)
+        self.intensity_scaling_combo.setCurrentText(mode)
+        self.intensity_scaling_combo.blockSignals(False)
+        self._apply_intensity_scaling(mode)
+
+        self._populate_diffraction_fields()
+        self._update_image_type_hint()
+        self._refresh_scale_information()
+
+    def _update_image_type_hint(self):
+        """Suggest switching image type when the file header disagrees with the selection."""
+        text = ""
+        button = ""
+        if self.image_processor.has_image():
+            header = self.image_processor.rod_header_info
+            if self.image_type == "real" and looks_like_diffraction_header(header):
+                text = "This file looks like a diffraction pattern (its header has no direct-space pixel size)."
+                button = "Switch to Diffraction"
+            elif self.image_type == "diffraction" and self.image_processor.get_file_pixel_size_nm():
+                text = "This file has a direct-space pixel size, so it looks like a real-space image."
+                button = "Switch to Real Space"
+        self.image_type_hint_label.setText(text)
+        self.image_type_hint_btn.setText(button)
+        self.image_type_hint_label.setVisible(bool(text))
+        self.image_type_hint_btn.setVisible(bool(text))
+
+    def on_intensity_scaling_changed(self, mode: str):
+        if mode not in ImageProcessor.INTENSITY_SCALING_MODES:
+            return
+        self._intensity_scaling_by_type[self.image_type] = mode
+        self._apply_intensity_scaling(mode)
+        self.update_display()
+
+    def _apply_intensity_scaling(self, mode: str):
+        """Rebuild the display image with a new raw -> 8-bit mapping and re-run auto contrast."""
+        processor = self.image_processor
+        if processor.intensity_scaling == mode:
+            return
+        processor.intensity_scaling = mode
+        if processor.has_image() and processor.set_intensity_scaling(mode):
+            processor.auto_adjust_contrast()
+            self._update_brightness_sliders()
+
+    # --- Calibration values ---
+
+    def _header_geometry(self) -> dict:
+        if not self.image_processor.has_image():
+            return {}
+        return self.image_processor.get_header_diffraction_geometry()
+
+    def _populate_diffraction_fields(self):
+        """Fill camera length / wavelength / pixel size from the header or manual values."""
+        header = self._header_geometry()
+        use_header = self.diffraction_use_header_checkbox.isChecked()
+        fields = (
+            ("camera_length_mm", self.camera_length_spinbox, "camera_length_mm", 1.0),
+            ("wavelength_angstrom", self.wavelength_spinbox, "wavelength_angstrom", 1.0),
+            ("pixel_size_mm", self.detector_pixel_spinbox, "pixel_size_um", 1000.0),
+        )
+        sources = []
+        self._syncing_diffraction_controls = True
+        try:
+            for header_key, spin, manual_key, factor in fields:
+                if use_header and header_key in header:
+                    spin.setValue(float(header[header_key]) * factor)
+                    spin.setEnabled(False)
+                    sources.append("header")
+                else:
+                    spin.setValue(float(self._diffraction_manual[manual_key]))
+                    spin.setEnabled(True)
+                    sources.append("manual")
+            self.voltage_combo.setEnabled(self.wavelength_spinbox.isEnabled())
+        finally:
+            self._syncing_diffraction_controls = False
+
+        if not self.image_processor.has_image():
+            text = "Header values are used when the loaded file provides them." if use_header else "Using manual values."
+        elif all(s == "header" for s in sources):
+            text = "Camera length, wavelength and pixel size from the file header."
+        elif all(s == "manual" for s in sources):
+            text = ("Using manual values (no header values in this file)." if use_header
+                    else "Using manual values.")
+        else:
+            missing = [name for name, s in zip(("camera length", "wavelength", "pixel size"), sources) if s == "manual"]
+            text = f"From file header, except {', '.join(missing)} (not in header - enter manually)."
+        self.diffraction_source_label.setText(text)
+
+    def on_diffraction_use_header_toggled(self, checked: bool):
+        self._populate_diffraction_fields()
+        if checked and self.image_processor.has_image() and "beam_center_px" in self._header_geometry():
+            self._beam_center_loaded = tuple(self._header_geometry()["beam_center_px"])
+        self._refresh_scale_information()
+
+    def on_diffraction_parameter_changed(self, _value: float = 0.0):
+        if self._syncing_diffraction_controls:
+            return
+        if self.camera_length_spinbox.isEnabled():
+            self._diffraction_manual["camera_length_mm"] = float(self.camera_length_spinbox.value())
+        if self.wavelength_spinbox.isEnabled():
+            self._diffraction_manual["wavelength_angstrom"] = float(self.wavelength_spinbox.value())
+        if self.detector_pixel_spinbox.isEnabled():
+            self._diffraction_manual["pixel_size_um"] = float(self.detector_pixel_spinbox.value())
+        self._update_diffraction_info_label()
+        self._update_measurement_info_label()
+        self.update_display()
+
+    def on_voltage_preset_selected(self, index: int):
+        kv = self.voltage_combo.itemData(index)
+        self.voltage_combo.setCurrentIndex(0)
+        if kv is None or not self.wavelength_spinbox.isEnabled():
+            return
+        self.wavelength_spinbox.setValue(electron_wavelength_angstrom(float(kv)))
+
+    def current_diffraction_geometry(self) -> Optional[DiffractionGeometry]:
+        """Active diffraction calibration, or None for real-space images."""
+        if self.image_type != "diffraction" or not hasattr(self, "camera_length_spinbox"):
+            return None
+        center = self._beam_center_current()
+        if center is None:
+            center = (float("nan"), float("nan"))
+        return DiffractionGeometry(
+            camera_length_mm=float(self.camera_length_spinbox.value()),
+            wavelength_angstrom=float(self.wavelength_spinbox.value()),
+            pixel_size_mm=float(self.detector_pixel_spinbox.value()) / 1000.0,
+            beam_center_px=(float(center[0]), float(center[1])),
+        )
+
+    # --- Beam centre ---
+
+    def _default_beam_center_loaded(self) -> Optional[tuple[float, float]]:
+        """Header beam position (as loaded) if enabled/available, else the current image centre."""
+        if not self.image_processor.has_image():
+            return None
+        header = self._header_geometry()
+        if self.diffraction_use_header_checkbox.isChecked() and "beam_center_px" in header:
+            return tuple(header["beam_center_px"])
+        h, w = self.image_processor.get_current_image().shape[:2]
+        return self.image_processor.map_current_to_loaded(w / 2.0, h / 2.0)
+
+    def _beam_center_current(self) -> Optional[tuple[float, float]]:
+        if not self.image_processor.has_image():
+            return None
+        if self._beam_center_loaded is None:
+            self._beam_center_loaded = self._default_beam_center_loaded()
+        if self._beam_center_loaded is None:
+            return None
+        return self.image_processor.map_loaded_to_current(*self._beam_center_loaded)
+
+    def _on_image_loaded_diffraction(self):
+        """New file: take calibration and beam centre from its header (or defaults)."""
+        self._beam_center_loaded = None
+        self._beam_center_loaded = self._default_beam_center_loaded()
+        self._populate_diffraction_fields()
+        self._update_image_type_hint()
+        self._refresh_scale_information()
+
+    def _sync_beam_center_controls(self):
+        """Show the beam centre in current image coordinates (follows crops and flips)."""
+        if not hasattr(self, "beam_center_x_spinbox"):
+            return
+        center = self._beam_center_current()
+        self._syncing_diffraction_controls = True
+        try:
+            enabled = center is not None
+            self.beam_center_x_spinbox.setEnabled(enabled)
+            self.beam_center_y_spinbox.setEnabled(enabled)
+            if center is not None:
+                self.beam_center_x_spinbox.setValue(center[0])
+                self.beam_center_y_spinbox.setValue(center[1])
+        finally:
+            self._syncing_diffraction_controls = False
+        self._update_diffraction_info_label()
+
+    def on_beam_center_spinbox_changed(self, _value: float = 0.0):
+        if self._syncing_diffraction_controls or not self.image_processor.has_image():
+            return
+        self._beam_center_loaded = self.image_processor.map_current_to_loaded(
+            float(self.beam_center_x_spinbox.value()), float(self.beam_center_y_spinbox.value())
+        )
+        self._update_diffraction_info_label()
+        self._update_measurement_info_label()
+        self.update_display()
+
+    def reset_beam_center(self):
+        self._beam_center_loaded = self._default_beam_center_loaded()
+        self._sync_beam_center_controls()
+        self._update_measurement_info_label()
+        self.update_display()
+
+    def _cancel_beam_pick(self):
+        if hasattr(self, "pick_beam_center_btn") and self.pick_beam_center_btn.isChecked():
+            self.pick_beam_center_btn.blockSignals(True)
+            self.pick_beam_center_btn.setChecked(False)
+            self.pick_beam_center_btn.blockSignals(False)
+        self._beam_pick_active = False
+
+    def on_beam_center_pick_toggled(self, checked: bool):
+        self._beam_pick_active = checked
+        if checked:
+            for btn_name in ("draw_measurement_btn", "move_line_btn", "move_label_btn", "move_scalebar_btn",
+                             "manual_crop_select_btn", "manual_crop_move_btn"):
+                btn = getattr(self, btn_name, None)
+                if btn is not None and btn.isChecked():
+                    btn.setChecked(False)
+            self._beam_pick_active = True
+            self.measurement_status_label.setText("Pick Beam Centre: click the direct beam / pattern centre on the image.")
+        self._refresh_image_interaction_mode()
+
+    def _on_diffraction_section_toggled(self, expanded: bool):
+        if not expanded and self.pick_beam_center_btn.isChecked():
+            self.pick_beam_center_btn.setChecked(False)
+
+    def handle_beam_center_click(self, label_x: int, label_y: int):
+        """Set the beam centre from a click on the image (optionally snapped to the peak)."""
+        if self._last_rendered_image_size is None:
+            return
+        img_w, img_h, scale, offset_x, offset_y = self._get_display_mapping()
+        fx = (float(label_x) - offset_x) / scale
+        fy = (float(label_y) - offset_y) / scale
+        if not (0.0 <= fx <= img_w and 0.0 <= fy <= img_h):
+            return
+        snapped = False
+        if self.snap_beam_center_checkbox.isChecked():
+            refined = self.image_processor.refine_peak_centroid(fx, fy)
+            if refined is not None:
+                fx, fy = refined
+                snapped = True
+        self._beam_center_loaded = self.image_processor.map_current_to_loaded(fx, fy)
+        self.pick_beam_center_btn.setChecked(False)
+        self._sync_beam_center_controls()
+        self._update_measurement_info_label()
+        self.measurement_status_label.setText(
+            f"Beam centre set to ({fx:.1f}, {fy:.1f})" + (" (snapped to intensity peak)." if snapped else ".")
+        )
+        self.update_display()
+
+    def _update_diffraction_info_label(self):
+        label = getattr(self, "diffraction_info_label", None)
+        if label is None:
+            return
+        geometry = self.current_diffraction_geometry()
+        if geometry is None or not geometry.is_valid():
+            label.setText("Load a diffraction pattern to see the reciprocal-space calibration."
+                          if not self.image_processor.has_image() else "Calibration incomplete.")
+            return
+        per_px = geometry.inv_angstrom_per_pixel()
+        lines = [f"Reciprocal pixel size: {per_px:.5f} Å⁻¹/px ({per_px * 10.0:.4f} nm⁻¹/px)"]
+        h, w = self.image_processor.get_current_image().shape[:2]
+        edge, corner = geometry.max_resolution_in_image(w, h)
+        edge_text = "-" if not np.isfinite(edge) else f"{edge:.2f} Å"
+        lines.append(f"Complete rings to {edge_text}; corners reach {corner:.2f} Å")
+        header = self.image_processor.rod_header_info or {}
+        try:
+            bin_x, bin_y = int(header.get("bin_x") or 1), int(header.get("bin_y") or 1)
+        except (TypeError, ValueError):
+            bin_x = bin_y = 1
+        if (bin_x, bin_y) != (1, 1):
+            lines.append(f"Binned image ({bin_x}×{bin_y}): please check the detector pixel size.")
+        from core.diffraction import header_tilt_warning
+        warning = header_tilt_warning(header)
+        if warning:
+            lines.append(warning)
+        label.setText("\n".join(lines))
+
+    # --- Resolution rings ---
+
+    def _populate_ring_list(self):
+        from qtpy.QtWidgets import QListWidgetItem
+        self.ring_list.blockSignals(True)
+        self.ring_list.clear()
+        entries = sorted(self.overlay_renderer.ring_resolutions, key=lambda e: float(e.get("d", 0.0)))
+        self.overlay_renderer.ring_resolutions = entries
+        for entry in entries:
+            d = float(entry.get("d"))
+            item = QListWidgetItem(format_resolution_label(d))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if entry.get("enabled", True) else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, d)
+            self.ring_list.addItem(item)
+        self.ring_list.blockSignals(False)
+
+    def _ring_entries_from_list(self) -> list:
+        entries = []
+        for row in range(self.ring_list.count()):
+            item = self.ring_list.item(row)
+            entries.append({
+                "d": float(item.data(Qt.ItemDataRole.UserRole)),
+                "enabled": item.checkState() == Qt.CheckState.Checked,
+            })
+        return entries
+
+    def on_ring_item_changed(self, _item):
+        self.overlay_renderer.ring_resolutions = self._ring_entries_from_list()
+        self.update_display()
+
+    def on_rings_toggled(self, state):
+        self.overlay_renderer.rings_enabled = (state == Qt.CheckState.Checked.value)
+        self.update_display()
+
+    def add_resolution_ring(self):
+        d = round(float(self.ring_add_spinbox.value()), 6)
+        if d <= 0:
+            return
+        entries = list(self.overlay_renderer.ring_resolutions)
+        for entry in entries:
+            if abs(float(entry["d"]) - d) < 1e-6:
+                entry["enabled"] = True
+                break
+        else:
+            entries.append({"d": d, "enabled": True})
+        self.overlay_renderer.ring_resolutions = entries
+        self._populate_ring_list()
+        if not self.rings_checkbox.isChecked():
+            self.rings_checkbox.setChecked(True)
+        geometry = self.current_diffraction_geometry()
+        if geometry is not None and geometry.is_valid() and geometry.radius_px_for_resolution(d) is None:
+            self.measurement_status_label.setText(
+                f"{format_resolution_label(d)} cannot be reached at this wavelength (λ/2d > 1 or 2θ ≥ 90°)."
+            )
+        self.update_display()
+
+    def remove_selected_resolution_rings(self):
+        rows = sorted({self.ring_list.row(item) for item in self.ring_list.selectedItems()}, reverse=True)
+        if not rows:
+            return
+        for row in rows:
+            self.ring_list.takeItem(row)
+        self.overlay_renderer.ring_resolutions = self._ring_entries_from_list()
+        self.update_display()
+
+    def restore_resolution_ring_presets(self):
+        self.overlay_renderer.ring_resolutions = [{"d": float(d), "enabled": True} for d in DEFAULT_RING_RESOLUTIONS]
+        self._populate_ring_list()
+        self.update_display()
+
+    def on_ring_style_changed(self, _value=None):
+        self.overlay_renderer.ring_line_width = int(self.ring_width_spinbox.value())
+        self.overlay_renderer.ring_show_labels = self.ring_labels_checkbox.isChecked()
+        self.overlay_renderer.beam_center_marker_enabled = self.beam_marker_checkbox.isChecked()
+        self.update_display()
+
+    def choose_ring_color(self):
+        color = QColorDialog.getColor(self.overlay_renderer.ring_color, self, "Choose Resolution Ring Color")
+        if color.isValid():
+            self.overlay_renderer.ring_color = color
+            set_color_button_indicator(self.ring_color_btn, color)
+            self.update_display()
+
     def update_display(self):
         """Update the displayed image."""
         if not self.image_processor.has_image():
             return
         
         # Get current image with overlays
+        diffraction = self.current_diffraction_geometry()
         q_image = self.overlay_renderer.render_image_with_overlays(
             self.image_processor.get_current_image(),
-            self.nm_per_pixel
+            self.nm_per_pixel,
+            diffraction,
         )
-        
+
         if q_image is None:
             return
+
+        too_long = (
+            diffraction is not None and diffraction.is_valid()
+            and not self.overlay_renderer.scalebar_fits(q_image.width(), q_image.height(), self.nm_per_pixel, diffraction)
+        )
+        if too_long and not getattr(self, "_scalebar_too_long_reported", False):
+            self.measurement_status_label.setText(
+                "Scalebar not drawn: the requested length is longer than the image. Choose a shorter length."
+            )
+        self._scalebar_too_long_reported = too_long
 
         self.draw_manual_crop_overlay(q_image)
 
@@ -1678,7 +2215,8 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             try:
                 q_image = self.overlay_renderer.render_image_with_overlays(
                     self.image_processor.get_current_image(),
-                    self.nm_per_pixel
+                    self.nm_per_pixel,
+                    self.current_diffraction_geometry(),
                 )
                 
                 if q_image is None:
@@ -1775,6 +2313,14 @@ class TEMImageEditor(CropControllerMixin, QMainWindow):
             initial_output_directory=self.batch_output_directory,
             default_crop_top_rows=int(self.crop_top_spinbox.value()) if hasattr(self, "crop_top_spinbox") else 10,
             default_crop_bottom_rows=int(self.crop_bottom_spinbox.value()) if hasattr(self, "crop_bottom_spinbox") else 9,
+            image_type=self.image_type,
+            diffraction_defaults={
+                "camera_length_mm": float(self._diffraction_manual["camera_length_mm"]),
+                "wavelength_angstrom": float(self._diffraction_manual["wavelength_angstrom"]),
+                "pixel_size_um": float(self._diffraction_manual["pixel_size_um"]),
+                "use_header": bool(self.diffraction_use_header_checkbox.isChecked()),
+                "intensity_scaling": self._intensity_scaling_by_type[self.image_type],
+            },
         )
         result = dialog.exec()
         self.batch_input_directory, self.batch_output_directory = dialog.get_last_directories()

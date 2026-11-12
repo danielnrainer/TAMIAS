@@ -24,6 +24,32 @@
     "scalebar_bg_enabled": true,
     "scalebar_bg_color": "#000000",
     "scalebar_bg_opacity": 255,
+    "recip_scalebar_unit": "Å⁻¹",
+    "recip_scalebar_length_value": 0.5,
+    "recip_measurement_unit": "Å⁻¹",
+    "rings_enabled": false,
+    "ring_resolutions": [
+      {
+        "d": 0.8,
+        "enabled": true
+      },
+      {
+        "d": 1.0,
+        "enabled": true
+      },
+      {
+        "d": 1.2,
+        "enabled": true
+      },
+      {
+        "d": 2.0,
+        "enabled": true
+      }
+    ],
+    "ring_color": "#00FFFF",
+    "ring_line_width": 2,
+    "ring_show_labels": true,
+    "beam_center_marker_enabled": false,
     "aperture_enabled": false,
     "aperture_nominal_size": 100,
     "aperture_color": "#FFFF00",
@@ -35,5 +61,15 @@
     "measurement_line_width": 3,
     "measurement_start_cap": "head",
     "measurement_end_cap": "head"
+  },
+  "diffraction": {
+    "image_type": "real",
+    "use_header": true,
+    "camera_length_mm": 650.0,
+    "wavelength_angstrom": 0.0251,
+    "pixel_size_um": 100.0,
+    "snap_beam_center": true,
+    "intensity_scaling_real": "Linear",
+    "intensity_scaling_diffraction": "Logarithmic"
   }
 }
