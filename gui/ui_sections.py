@@ -510,7 +510,7 @@ def _make_spinbox(minimum: float, maximum: float, decimals: int, step: float, su
 
 def setup_diffraction_calibration_controls(editor: Any, parent_layout):
     """Calibration of diffraction patterns: camera length, wavelength, pixel size, beam centre."""
-    box = QCollapsibleBox("Diffraction Calibration", expanded=True)
+    box = QCollapsibleBox("Diffraction Calibration", expanded=False)
     layout = QVBoxLayout()
 
     editor.diffraction_use_header_checkbox = QCheckBox("Use file header values where available")
@@ -606,6 +606,16 @@ def setup_resolution_ring_controls(editor: Any, parent_layout):
     editor.rings_checkbox.stateChanged.connect(editor.on_rings_toggled)
     layout.addWidget(editor.rings_checkbox)
 
+    editor.ring_labels_checkbox = QCheckBox("Label rings with resolution")
+    editor.ring_labels_checkbox.setChecked(bool(editor.overlay_renderer.ring_show_labels))
+    editor.ring_labels_checkbox.stateChanged.connect(editor.on_ring_style_changed)
+    layout.addWidget(editor.ring_labels_checkbox)
+
+    editor.beam_marker_checkbox = QCheckBox("Mark beam centre")
+    editor.beam_marker_checkbox.setChecked(bool(editor.overlay_renderer.beam_center_marker_enabled))
+    editor.beam_marker_checkbox.stateChanged.connect(editor.on_ring_style_changed)
+    layout.addWidget(editor.beam_marker_checkbox)
+
     layout.addWidget(QLabel("Rings (d-spacing, tick to show):"))
     editor.ring_list = QListWidget()
     editor.ring_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -649,11 +659,6 @@ def setup_resolution_ring_controls(editor: Any, parent_layout):
     color_layout.addWidget(editor.ring_color_btn)
     layout.addLayout(color_layout)
 
-    editor.ring_labels_checkbox = QCheckBox("Label rings with resolution")
-    editor.ring_labels_checkbox.setChecked(bool(editor.overlay_renderer.ring_show_labels))
-    editor.ring_labels_checkbox.stateChanged.connect(editor.on_ring_style_changed)
-    layout.addWidget(editor.ring_labels_checkbox)
-
     ring_font_layout = QHBoxLayout()
     editor.ring_font_label = QLabel("")
     ring_font_layout.addWidget(editor.ring_font_label)
@@ -674,11 +679,6 @@ def setup_resolution_ring_controls(editor: Any, parent_layout):
     reset_ring_labels_btn.clicked.connect(editor.reset_ring_label_positions)
     ring_label_btn_layout.addWidget(reset_ring_labels_btn)
     layout.addLayout(ring_label_btn_layout)
-
-    editor.beam_marker_checkbox = QCheckBox("Mark beam centre")
-    editor.beam_marker_checkbox.setChecked(bool(editor.overlay_renderer.beam_center_marker_enabled))
-    editor.beam_marker_checkbox.stateChanged.connect(editor.on_ring_style_changed)
-    layout.addWidget(editor.beam_marker_checkbox)
 
     editor.ring_info_label = QLabel(
         "Ring radius from Bragg's law on a flat detector: R = L·tan(2θ), sin θ = λ/(2d)."
