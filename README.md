@@ -67,7 +67,7 @@ pip install -r requirements.txt
 ```
   Install one Qt backend as well, for example `pip install PyQt6` or `pip install PySide6`. This includes [rodhypix](https://pypi.org/project/rodhypix/), which provides `.rodhypix` file support with a native C++/NumPy backend on supported platforms and a pure Python fallback elsewhere.
 
-3. (Optional, for developers) Install the test dependencies:
+3. (Optional, for developers) Install the development dependencies (tests and PyInstaller):
 ```bash
 pip install -r requirements-dev.txt
 ```
@@ -170,8 +170,8 @@ TAMIAS/
 │   └── storage_paths.py            # Per-user app-data path helpers
 ├── TAMIAS.py                       # Main application entry point
 ├── TAMIAS.spec                     # PyInstaller build specification
-├── requirements.txt                # Python dependencies (runtime and build)
-├── requirements-dev.txt            # Test dependencies (adds pytest)
+├── requirements.txt                # Runtime dependencies
+├── requirements-dev.txt            # Development dependencies (adds PyInstaller and pytest)
 ├── presets_defaults.json           # Shipped preset/crop defaults
 ├── settings_defaults.json          # Shipped app settings defaults
 ├── tamias.ico                      # Application icon
@@ -185,10 +185,9 @@ TAMIAS/
 - One Qt backend: PyQt6 or PySide6
 - NumPy >= 1.24, < 3
 - Pillow >= 10, < 13
-- PyInstaller >= 6.0, < 7 (for building executables)
 - rodhypix >= 0.1.3, < 0.2 (for `.rodhypix` file support)
 
-Test-only (`requirements-dev.txt`): pytest
+Development only (`requirements-dev.txt`, which also includes the runtime requirements): PyInstaller >= 6.0, < 7 (for building executables) and pytest >= 8, < 10 (for tests)
 
 ## Running Tests
 
@@ -226,7 +225,7 @@ The tests cover the diffraction geometry (electron wavelength, ring radii, recip
 
 Create a standalone executable with PyInstaller (the spec includes the diffraction modules and all Qt backends TAMIAS uses):
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 pyinstaller TAMIAS.spec
 ```
 The executable is written to `dist/TAMIAS.exe`.
